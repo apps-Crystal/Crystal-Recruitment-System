@@ -3,7 +3,7 @@
  * Deploy: Extensions → Apps Script → Deploy → New deployment
  *   Type: Web App | Execute as: Me | Access: Anyone
  */
-export const GAS_URL = "https://script.google.com/macros/s/AKfycbwETlAf-xrYqAYtSztQnysNSvaKVBgVqntgsIOGbYZZP7NCWSbl6Ble0fNl9Ywf06t5zQ/exec";
+export const GAS_URL = import.meta.env.VITE_GAS_URL;
 
 async function gasGet(params) {
   try {
