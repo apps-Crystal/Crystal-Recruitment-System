@@ -1,7 +1,7 @@
 /**
- * Paste your deployed GAS Web App URL here after deploying Code.gs
- * Deploy: Extensions → Apps Script → Deploy → New deployment
- *   Type: Web App | Execute as: Me | Access: Anyone
+ * Backend URL — set VITE_GAS_URL in recruitment-app/.env
+ * Development: http://localhost:3001
+ * Production:  https://your-deployed-backend.com
  */
 export const GAS_URL = import.meta.env.VITE_GAS_URL;
 
@@ -18,10 +18,9 @@ async function gasGet(params) {
 
 async function gasPost(body) {
   try {
-    // GAS doPost requires Content-Type: text/plain to avoid CORS preflight
     const r = await fetch(GAS_URL, {
       method:  "POST",
-      headers: { "Content-Type": "text/plain" },
+      headers: { "Content-Type": "application/json" },
       body:    JSON.stringify(body),
     });
     if (!r.ok) return { success: false, error: `Server error: HTTP ${r.status}` };
@@ -29,11 +28,11 @@ async function gasPost(body) {
     try {
       json = await r.json();
     } catch {
-      return { success: false, error: "GAS returned non-JSON (check deployment: Execute as Me, Access: Anyone)" };
+      return { success: false, error: "Backend returned non-JSON — is the server running?" };
     }
     return json;
   } catch (err) {
-    return { success: false, error: err.message || "Network error — check your connection" };
+    return { success: false, error: err.message || "Network error — is the backend running on port 3001?" };
   }
 }
 
@@ -111,6 +110,11 @@ export async function getApprovals(params = {}) {
 
 export async function submitApproval(data) {
   return gasPost({ action: "submitApproval", data });
+}
+
+/* ── CV Data Extraction — Module 2 helper ── */
+export async function extractCVData(resume_base64) {
+  return gasPost({ action: "extractCVData", resume_base64 });
 }
 
 /* ── Module 3 — AI Evaluation ── */

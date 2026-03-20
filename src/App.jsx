@@ -7,6 +7,7 @@ import ProtectedRoute from "./components/ProtectedRoute";
 import LoginPage              from "./pages/LoginPage";
 import DashboardPage          from "./pages/DashboardPage";
 import RaiseRequisitionPage   from "./pages/RaiseRequisitionPage";
+import AllRequisitionsPage    from "./pages/AllRequisitionsPage";
 import ApproveRequisitionPage from "./pages/ApproveRequisitionPage";
 import MyRequestsPage         from "./pages/MyRequestsPage";
 import ScreeningPage          from "./pages/ScreeningPage";
@@ -44,7 +45,7 @@ function AppRoutes() {
               {/* Module 1 — Job Requisition */}
               <Route path="/raise"          element={<ProtectedRoute roles={R.raiseReq}><RaiseRequisitionPage/></ProtectedRoute>}/>
               <Route path="/approve"        element={<ProtectedRoute roles={R.approveReq}><ApproveRequisitionPage/></ProtectedRoute>}/>
-              <Route path="/requisitions"   element={<ProtectedRoute roles={R.viewAll}><DashboardPage/></ProtectedRoute>}/>
+              <Route path="/requisitions"   element={<ProtectedRoute roles={R.viewAll}><AllRequisitionsPage/></ProtectedRoute>}/>
               <Route path="/my-requests"    element={<MyRequestsPage/>}/>
 
               {/* Module 2 — Candidate Screening & Entry */}

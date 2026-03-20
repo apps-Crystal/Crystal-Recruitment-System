@@ -1,1815 +1,833 @@
-import React, { useEffect, useState } from "react";
+/**
+ * Module 2 — Candidate Screening & Entry (SOP-HR-001 §6)
+ * Senior HR Executive records candidate details after telephonic screening.
+ * Advances candidate to AI_EVALUATION stage on submission.
+ *
+ * Fields per SOP §6.2:
+ *   Candidate info, source, experience, CTC, notice period,
+ *   resume (PDF ≤5MB), optional screening recording (≤15MB),
+ *   fit assessment (Shortlisted / On Hold / Rejected), remarks.
+ */
+import React, { useEffect, useState, useCallback, useLayoutEffect, useContext } from "react";
 import { useAuth } from "../context/AuthContext";
-import { getRequisitions, getScreenings, submitScreening, getInterviews, getApprovals } from "../utils/api";
+import { useToast } from "../context/ToastContext";
+import { LayoutContext } from "../components/Layout";
+import { getRequisitions, getScreenings, submitScreening, extractCVData } from "../utils/api";
+import {
+  PageHeader, Button, Badge, ReqStatusBadge,
+  RadioChips, LoadingPane, EmptyState,
+  PipelineTracker, Divider, Alert, Card,
+} from "../components/ui";
 
-/* ─── Constants ─────────────────────────────────────────────── */
-
-const INTERVIEWERS = [
-  "Yatish Agarwal",
-  "Himani Khemka",
-  "Anindita Das",
-  "Joyeeta Dastidar",
-  "Sameeksha",
-  "Nabarupa Sen",
-  "Namrata Rai",
-  "Sayantani Basu Roy",
-];
-
+/* ── Constants ───────────────────────────────────────────────── */
 const SOURCES = [
-  "Naukri Posting",
-  "Naukri Search",
-  "LinkedIn",
-  "Indeed",
-  "Employee Reference",
-  "Other",
-];
-
-const FIT_OPTIONS = [
-  { value: "Shortlisted", color: "var(--color-success)",  bg: "rgba(22,163,74,0.1)"  },
-  { value: "On Hold",     color: "var(--color-warning)",  bg: "rgba(217,119,6,0.1)"  },
-  { value: "Rejected",    color: "var(--color-danger)",   bg: "rgba(198,40,40,0.1)"  },
+  "Naukri Posting", "Naukri Search", "LinkedIn",
+  "Indeed", "Employee Reference", "Other",
 ];
 
 const NOTICE_OPTIONS = ["Immediate", "15 Days", "30 Days", "60+ Days"];
 
-const EMPTY_FORM = {
-  interviewer_name: "",
-  source: "",
-  candidate_name: "",
-  phone: "",
-  candidate_email: "",
-  experience_years: "",
-  screening_remarks: "",
-  fit_assessment: "",
-  current_company: "",
-  job_location: "",
-  notice_period: "",
-  current_ctc: "",
-  expected_ctc: "",
+const FIT_OPTIONS = [
+  { value: "Shortlisted", label: "✓ Shortlist" },
+  { value: "On Hold",     label: "⏸ Hold"      },
+  { value: "Rejected",    label: "✕ Reject"     },
+];
+
+const FIT_COLOR = {
+  "Shortlisted": { bg: "#dcfce7", color: "#15803d", border: "#16a34a" },
+  "On Hold":     { bg: "#fef9c3", color: "#92400e", border: "#ca8a04" },
+  "Rejected":    { bg: "#fee2e2", color: "#991b1b", border: "#dc2626" },
 };
 
 const MAX_RESUME_MB    = 5;
 const MAX_RECORDING_MB = 15;
 
-/* ─── Sub-components ─────────────────────────────────────────── */
+const EMPTY_FORM = {
+  candidate_name:    "",
+  phone:             "",
+  candidate_email:   "",
+  source:            "",
+  current_company:   "",
+  job_location:      "",
+  experience_years:  "",
+  notice_period:     "",
+  current_ctc:       "",
+  expected_ctc:      "",
+  fit_assessment:    "",
+  screening_remarks: "",
+};
 
-function SectionHeader({ children }) {
-  return (
-    <div
-      className="text-xs font-bold uppercase tracking-widest px-4 py-2.5"
-      style={{
-        color: "var(--color-primary-700)",
-        background: "var(--color-primary-50)",
-        borderBottom: "1px solid var(--color-border)",
-        letterSpacing: "0.08em",
-      }}
-    >
-      {children}
-    </div>
-  );
-}
-
-function Field({ label, required, hint, error, children }) {
-  return (
-    <div className="flex flex-col gap-1">
-      <div className="flex items-baseline gap-1.5 flex-wrap">
-        <label className="text-xs font-semibold" style={{ color: "var(--color-text-secondary)" }}>
-          {label}
-          {required && <span className="ml-0.5" style={{ color: "var(--color-danger)" }}>*</span>}
-        </label>
-        {hint && <span className="text-xs" style={{ color: "var(--color-text-secondary)", opacity: 0.7 }}>{hint}</span>}
-      </div>
-      {children}
-      {error && (
-        <span className="text-xs font-medium" style={{ color: "var(--color-danger)" }}>
-          {error}
-        </span>
-      )}
-    </div>
-  );
-}
-
-function RadioChips({ options, value, onChange, errorKey, errors }) {
-  return (
-    <div className="flex flex-wrap gap-2 mt-1">
-      {options.map(opt => {
-        const optValue = typeof opt === "string" ? opt : opt.value;
-        const optLabel = typeof opt === "string" ? opt : opt.label || opt.value;
-        const selected = value === optValue;
-        return (
-          <button
-            key={optValue}
-            type="button"
-            onClick={() => onChange(optValue)}
-            className="px-3 py-1.5 rounded-sm text-xs font-medium transition-all select-none"
-            style={{
-              background: selected ? "var(--color-primary-800)" : "var(--color-surface)",
-              border: `1px solid ${selected ? "var(--color-primary-700)" : "var(--color-border)"}`,
-              color: selected ? "#fff" : "var(--color-text-secondary)",
-              cursor: "pointer",
-            }}
-          >
-            {selected && <span className="mr-1">✓</span>}
-            {optLabel}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function FitChips({ value, onChange }) {
-  return (
-    <div className="flex flex-wrap gap-2 mt-1">
-      {FIT_OPTIONS.map(opt => {
-        const selected = value === opt.value;
-        return (
-          <button
-            key={opt.value}
-            type="button"
-            onClick={() => onChange(opt.value)}
-            className="px-4 py-1.5 rounded-sm text-xs font-semibold transition-all select-none"
-            style={{
-              background: selected ? opt.bg : "var(--color-surface)",
-              border: `1px solid ${selected ? opt.color : "var(--color-border)"}`,
-              color: selected ? opt.color : "var(--color-text-secondary)",
-              cursor: "pointer",
-              fontWeight: selected ? 700 : 500,
-            }}
-          >
-            {selected && <span className="mr-1">✓</span>}
-            {opt.value}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function FitBadge({ value }) {
-  const opt = FIT_OPTIONS.find(o => o.value === value);
-  if (!opt) return <span>{value}</span>;
-  return (
-    <span
-      className="inline-flex items-center px-3 py-1 rounded-sm text-xs font-bold"
-      style={{ background: opt.bg, color: opt.color, border: `1px solid ${opt.color}` }}
-    >
-      {value}
-    </span>
-  );
-}
-
-function FileDropZone({ accept, maxMB, file, onChange, label, id }) {
-  const [dragging, setDragging] = useState(false);
-
-  const dragHandlers = {
-    onDragOver:  e => { e.preventDefault(); setDragging(true); },
-    onDragLeave: () => setDragging(false),
-    onDrop:      e => {
-      e.preventDefault();
-      setDragging(false);
-      const f = e.dataTransfer.files[0];
-      if (f) validateAndSet(f);
-    },
-  };
-
-  function validateAndSet(f) {
-    if (f.size > maxMB * 1024 * 1024) {
-      alert(`File too large. Maximum is ${maxMB} MB.`);
-      return;
-    }
-    onChange(f);
-  }
-
-  // Hidden input — always rendered so the label/button can trigger it
-  const input = (
-    <input
-      id={id}
-      type="file"
-      accept={accept}
-      className="sr-only"
-      onChange={e => { if (e.target.files[0]) validateAndSet(e.target.files[0]); }}
-      // Reset value so re-selecting same file still fires onChange
-      onClick={e => { e.target.value = ""; }}
-    />
-  );
-
-  /* ── File selected: plain div — no accidental dialog re-open ── */
-  if (file) {
-    return (
-      <div
-        className="flex items-center gap-2 rounded-sm px-3 py-3"
-        style={{
-          border: "1.5px solid var(--color-success)",
-          background: "rgba(22,163,74,0.05)",
-          minHeight: 52,
-        }}
-        {...dragHandlers}
-      >
-        {input}
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="16" height="16" style={{ color: "var(--color-success)", flexShrink: 0 }}><polyline points="20 6 9 17 4 12"/></svg>
-        <span className="text-xs font-semibold truncate flex-1" style={{ color: "var(--color-success)" }}>{file.name}</span>
-        <span className="text-xs flex-shrink-0" style={{ color: "var(--color-text-secondary)" }}>
-          {(file.size / 1024 / 1024).toFixed(2)} MB
-        </span>
-        {/* Change link — only this triggers the dialog */}
-        <label
-          htmlFor={id}
-          className="text-xs font-semibold flex-shrink-0 cursor-pointer"
-          style={{ color: "var(--color-primary-700)", textDecoration: "underline" }}
-        >
-          Change
-        </label>
-        <button
-          type="button"
-          onClick={() => onChange(null)}
-          className="flex-shrink-0 text-xs font-bold"
-          style={{ color: "var(--color-danger)", background: "none", border: "none", cursor: "pointer", lineHeight: 1 }}
-          title="Remove file"
-        >
-          ✕
-        </button>
-      </div>
-    );
-  }
-
-  /* ── No file: full area is a label ── */
-  return (
-    <label
-      htmlFor={id}
-      className="flex flex-col items-center justify-center gap-2 rounded-sm cursor-pointer transition-all"
-      style={{
-        border: `1.5px dashed ${dragging ? "var(--color-primary-600)" : "var(--color-border)"}`,
-        background: dragging ? "var(--color-primary-50)" : "var(--color-surface)",
-        padding: "18px 16px",
-        minHeight: 72,
-      }}
-      {...dragHandlers}
-    >
-      {input}
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" width="22" height="22" style={{ color: "var(--color-text-secondary)" }}>
-        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-        <polyline points="17 8 12 3 7 8"/>
-        <line x1="12" y1="3" x2="12" y2="15"/>
-      </svg>
-      <div className="text-center">
-        <span className="text-xs font-semibold" style={{ color: "var(--color-primary-700)" }}>{label}</span>
-        <span className="text-xs ml-1" style={{ color: "var(--color-text-secondary)" }}>or drag and drop</span>
-        <div className="text-xs mt-0.5" style={{ color: "var(--color-text-secondary)" }}>Max {maxMB} MB</div>
-      </div>
-    </label>
-  );
-}
-
-/* ─── File → base64 helper ──────────────────────────────────── */
-function readFile(file) {
-  return new Promise((resolve, reject) => {
+/* ── Helpers ─────────────────────────────────────────────────── */
+function readFileAsBase64(file) {
+  return new Promise((res, rej) => {
     const reader = new FileReader();
-    reader.onloadend = () => resolve(reader.result.split(",")[1]);
-    reader.onerror = reject;
+    reader.onloadend = () => res(reader.result.split(",")[1]);
+    reader.onerror   = rej;
     reader.readAsDataURL(file);
   });
 }
 
-function getFileExt(file) {
-  return file.name.split(".").pop().toLowerCase();
+function fmtDate(val) {
+  if (!val) return "—";
+  const d = new Date(val);
+  return isNaN(d) ? val : d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
 }
 
-/* ─── ScreeningRecords component ─────────────────────────────── */
+/* ── Req Card (left panel) ───────────────────────────────────── */
+function ReqCard({ req, isActive, onClick, candidateCount }) {
+  return (
+    <button
+      type="button"
+      onClick={() => onClick(req)}
+      style={{
+        width: "100%", textAlign: "left", padding: "10px 12px",
+        borderRadius: 6, border: "none", cursor: "pointer", marginBottom: 2,
+        background: isActive ? "rgba(200,169,81,0.12)" : "transparent",
+        borderLeft: `3px solid ${isActive ? "var(--color-accent-500)" : "transparent"}`,
+        transition: "background 150ms",
+      }}
+      onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = "rgba(0,0,0,0.04)"; }}
+      onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 6 }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontWeight: 600, fontSize: 12, color: "var(--color-text-primary)", marginBottom: 2, lineHeight: 1.3 }}>
+            {req.position_title || "—"}
+          </div>
+          <div style={{ fontSize: 10, color: "var(--color-text-secondary)", marginBottom: 4 }}>
+            <span style={{ fontFamily: "monospace", fontWeight: 700 }}>{req.req_id}</span>
+            {req.department && ` · ${req.department}`}
+          </div>
+        </div>
+        <ReqStatusBadge status={req.status} />
+      </div>
+      <div style={{ display: "flex", gap: 4, alignItems: "center", flexWrap: "wrap" }}>
+        {candidateCount > 0 && (
+          <Badge color="#6366f1" bg="rgba(99,102,241,0.08)">{candidateCount} screened</Badge>
+        )}
+        {req.location && (
+          <span style={{ fontSize: 10, color: "var(--color-text-secondary)" }}>📍 {req.location}</span>
+        )}
+      </div>
+    </button>
+  );
+}
 
-function ScreeningRecords({ screenings, interviews, approvals, loading, reqs, search, onSearch, filterReq, onFilterReq, filterFit, onFilterFit, expandedRec, onExpand }) {
+/* ── Candidate Row (screened list) ───────────────────────────── */
+function CandidateRow({ c, onSelect }) {
+  const fit  = c.fit_assessment || c.FitAssessment || "";
+  const fcfg = FIT_COLOR[fit] || null;
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(c)}
+      style={{
+        width: "100%", textAlign: "left", padding: "9px 12px",
+        borderRadius: 6, border: "none", cursor: "pointer", marginBottom: 2,
+        background: "transparent", borderLeft: "3px solid transparent",
+      }}
+      onMouseEnter={e => { e.currentTarget.style.background = "rgba(0,0,0,0.04)"; }}
+      onMouseLeave={e => { e.currentTarget.style.background = "transparent"; }}
+    >
+      <div style={{ fontWeight: 600, fontSize: 12, color: "var(--color-text-primary)", marginBottom: 2 }}>
+        {c.candidate_name || c.FullName || "—"}
+      </div>
+      <div style={{ fontSize: 10, color: "var(--color-text-secondary)", marginBottom: 3 }}>
+        {c.phone || "—"} · {c.experience_years ? `${c.experience_years} yrs` : "—"} exp
+      </div>
+      <div style={{ display: "flex", gap: 4 }}>
+        {fit && fcfg && (
+          <span style={{ padding: "1px 7px", borderRadius: 3, fontSize: 9, fontWeight: 700, background: fcfg.bg, color: fcfg.color }}>
+            {fit}
+          </span>
+        )}
+        {c.source && <span style={{ fontSize: 9, color: "var(--color-text-secondary)" }}>{c.source}</span>}
+      </div>
+    </button>
+  );
+}
 
-  const fitColors = {
-    Shortlisted: { color: "var(--color-success)",  bg: "rgba(22,163,74,0.1)"  },
-    "On Hold":   { color: "var(--color-warning)",  bg: "rgba(217,119,6,0.1)"  },
-    Rejected:    { color: "var(--color-danger)",   bg: "rgba(198,40,40,0.1)"  },
-  };
-
-  // Build lookup maps
-  const approvalMap = {};
-  [...(approvals || [])]
-    .sort((a, b) => new Date(a.approved_at || 0) - new Date(b.approved_at || 0))
-    .forEach(r => { approvalMap[r.screening_id] = r; });
-
-  const intMap = {};
-  (interviews || []).forEach(r => {
-    if (!intMap[r.screening_id]) intMap[r.screening_id] = [];
-    intMap[r.screening_id].push(r);
-  });
-
-  function getCurrentStatus(rec) {
-    const apr = approvalMap[rec.submission_id];
-    if (apr?.decision) return { module: "Offer Decision", label: apr.decision, color: STAGE_COLOR[apr.decision] || STAGE_COLOR["Pending"] };
-    const ints = intMap[rec.submission_id] || [];
-    const sorted = [...ints].sort((a, b) => {
-      const n = s => parseInt((s || "").replace(/\D/g, "") || "0");
-      return n(b.interview_round) - n(a.interview_round);
-    });
-    if (sorted.length > 0) {
-      const latest = sorted[0];
-      const isFinal = latest.is_final_round === true || String(latest.is_final_round).toLowerCase() === "true";
-      const module = (latest.round_description || latest.interview_round || "Interview") + (isFinal ? " 🏁" : "");
-      const label = latest.final_decision || "In Progress";
-      return { module, label, color: STAGE_COLOR[latest.final_decision] || STAGE_COLOR["Pending"] };
-    }
-    return { module: "Screening", label: rec.fit_assessment || "—", color: STAGE_COLOR[rec.fit_assessment] || STAGE_COLOR["Pending"] };
-  }
-
-  /* Filter */
-  const filtered = screenings.filter(r => {
-    const q = search.toLowerCase();
-    const matchSearch = !q ||
-      (r.candidate_name || "").toLowerCase().includes(q) ||
-      (r.phone || "").includes(q) ||
-      (r.req_id || "").toLowerCase().includes(q) ||
-      (r.position_title || "").toLowerCase().includes(q) ||
-      (r.interviewer_name || "").toLowerCase().includes(q) ||
-      (r.submission_id || "").toLowerCase().includes(q);
-    const matchReq = !filterReq || r.req_id === filterReq;
-    const matchFit = !filterFit || r.fit_assessment === filterFit;
-    return matchSearch && matchReq && matchFit;
-  });
-
-  /* Unique reqs from screenings for dropdown */
-  const reqOptions = [...new Set(screenings.map(r => r.req_id).filter(Boolean))];
-
-  function formatDate(val) {
-    if (!val) return "—";
-    const d = new Date(val);
-    if (isNaN(d)) return val;
-    return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
-  }
+/* ── Candidate Detail (right panel after clicking a screened candidate) */
+function CandidateDetail({ candidate, onBack }) {
+  const c    = candidate;
+  const fit  = c.fit_assessment || c.FitAssessment || "";
+  const fcfg = FIT_COLOR[fit] || { bg: "#f3f4f6", color: "#6b7280", border: "#d1d5db" };
 
   return (
-    <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-
-      {/* ── Filter bar ── */}
-      <div
-        className="flex flex-wrap items-center gap-2 px-4 py-2.5 flex-shrink-0"
-        style={{ borderBottom: "1px solid var(--color-border)", background: "var(--color-surface)" }}
+    <div style={{ padding: 20 }}>
+      <button
+        type="button"
+        onClick={onBack}
+        style={{
+          display: "inline-flex", alignItems: "center", gap: 6, marginBottom: 16,
+          background: "none", border: "none", cursor: "pointer",
+          fontSize: 12, color: "var(--color-text-secondary)", padding: 0,
+        }}
       >
-        {/* Search */}
-        <div className="relative flex-1" style={{ minWidth: 180, maxWidth: 300 }}>
-          <svg
-            viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
-            strokeLinecap="round" strokeLinejoin="round" width="13" height="13"
-            style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: "var(--color-text-secondary)", pointerEvents: "none" }}
-          >
-            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        ← Back
+      </button>
+
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 16 }}>
+        <div style={{
+          width: 44, height: 44, borderRadius: "50%", flexShrink: 0,
+          background: "var(--color-primary-100)", display: "flex",
+          alignItems: "center", justifyContent: "center",
+          fontSize: 16, fontWeight: 700, color: "var(--color-primary-700)",
+        }}>
+          {(c.candidate_name || "?")[0].toUpperCase()}
+        </div>
+        <div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: "var(--color-text-primary)" }}>
+            {c.candidate_name || "—"}
+          </div>
+          <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 2 }}>
+            {c.candidate_email || "—"} · {c.phone || "—"}
+          </div>
+          <div style={{ marginTop: 6 }}>
+            {fit && (
+              <span style={{
+                padding: "3px 10px", borderRadius: 4, fontSize: 10, fontWeight: 700,
+                background: fcfg.bg, color: fcfg.color, border: `1px solid ${fcfg.border}`,
+              }}>
+                {fit}
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Pipeline */}
+      <Card style={{ padding: "12px 16px", marginBottom: 16 }}>
+        <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-text-secondary)", marginBottom: 10 }}>
+          Hiring Pipeline
+        </div>
+        <PipelineTracker currentStage={c.stage || "SCREENING"} />
+      </Card>
+
+      {/* Info grid */}
+      <Card style={{ padding: "14px 16px", marginBottom: 16 }}>
+        <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-text-secondary)", marginBottom: 12 }}>
+          Screening Details
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 20px" }}>
+          {[
+            ["Current Company", c.current_company],
+            ["Location",        c.job_location],
+            ["Experience",      c.experience_years ? `${c.experience_years} yrs` : "—"],
+            ["Notice Period",   c.notice_period],
+            ["Current CTC",     c.current_ctc ? `₹${c.current_ctc} LPA` : "—"],
+            ["Expected CTC",    c.expected_ctc ? `₹${c.expected_ctc} LPA` : "—"],
+            ["Source",          c.source],
+            ["Screened By",     c.screened_by || c.interviewer_name],
+            ["Screened On",     fmtDate(c.screened_at || c.timestamp)],
+            ["Req ID",          c.req_id],
+          ].map(([lbl, val]) => (
+            <div key={lbl}>
+              <div style={{ fontSize: 10, color: "var(--color-text-secondary)", marginBottom: 2 }}>{lbl}</div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--color-text-primary)" }}>{val || "—"}</div>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      {(c.screening_remarks || c.remarks) && (
+        <Card style={{ padding: "14px 16px" }}>
+          <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-text-secondary)", marginBottom: 8 }}>
+            Remarks
+          </div>
+          <p style={{ fontSize: 12, color: "var(--color-text-primary)", lineHeight: 1.7, margin: 0 }}>
+            {c.screening_remarks || c.remarks}
+          </p>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+/* ── Screening Form ──────────────────────────────────────────── */
+function ScreeningForm({ req, onSuccess }) {
+  const { user }     = useAuth();
+  const { addToast } = useToast();
+
+  const [form, setForm]             = useState({ ...EMPTY_FORM });
+  const [errors, setErrors]         = useState({});
+  const [resume, setResume]         = useState(null);
+  const [recording, setRecording]   = useState(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [extracting, setExtracting] = useState(false);  // CV extraction loading state
+  const [cvFilled, setCvFilled]     = useState([]);      // list of fields auto-filled from CV
+
+  function setField(key, val) {
+    setForm(prev => ({ ...prev, [key]: val }));
+    if (errors[key]) setErrors(prev => ({ ...prev, [key]: null }));
+  }
+
+  function validate() {
+    const e = {};
+    if (!form.candidate_name.trim())    e.candidate_name    = "Required";
+    if (!form.phone.trim())             e.phone             = "Required";
+    if (!form.candidate_email.trim())   e.candidate_email   = "Required";
+    if (!form.source)                   e.source            = "Select a source";
+    if (!form.experience_years)         e.experience_years  = "Required";
+    if (!form.fit_assessment)           e.fit_assessment    = "Select a fit assessment";
+    if (!form.screening_remarks.trim()) e.screening_remarks = "Remarks are required (SOP §6.4)";
+    if (!resume)                        e.resume            = "Resume is required";
+    return e;
+  }
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    const errs = validate();
+    if (Object.keys(errs).length) { setErrors(errs); return; }
+
+    setSubmitting(true);
+    try {
+      const resumeB64    = await readFileAsBase64(resume);
+      const recordingB64 = recording ? await readFileAsBase64(recording) : null;
+
+      const res = await submitScreening({
+        ...form,
+        req_id:             req.req_id,
+        position_title:     req.position_title,
+        screened_by:        user?.name || user?.email,
+        screened_at:        new Date().toISOString(),
+        resume_base64:      resumeB64,
+        resume_filename:    resume.name,
+        recording_base64:   recordingB64,
+        recording_filename: recording?.name || null,
+        stage:              "SCREENING",
+      });
+
+      if (res?.success) {
+        addToast(`${form.candidate_name} added to screening queue.`, "success");
+        setForm({ ...EMPTY_FORM });
+        setResume(null);
+        setRecording(null);
+        setCvFilled([]);
+        onSuccess?.();
+      } else {
+        addToast(res?.error || "Submission failed. Please try again.", "error");
+      }
+    } catch {
+      addToast("Unexpected error. Please try again.", "error");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleResume(e) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    if (f.name.split(".").pop().toLowerCase() !== "pdf") {
+      setErrors(p => ({ ...p, resume: "Only PDF files accepted" })); return;
+    }
+    if (f.size > MAX_RESUME_MB * 1024 * 1024) {
+      setErrors(p => ({ ...p, resume: `Max ${MAX_RESUME_MB}MB` })); return;
+    }
+    setResume(f);
+    setErrors(p => ({ ...p, resume: null }));
+
+    /* ── Auto-extract CV data ── */
+    setExtracting(true);
+    setCvFilled([]);
+    try {
+      const base64 = await readFileAsBase64(f);
+      const res    = await extractCVData(base64);
+
+      if (res?.success && res.data) {
+        const d = res.data;
+
+        // Map extracted fields → only fill fields that are currently empty
+        const FIELD_LABELS = {
+          candidate_name:   "Name",
+          phone:            "Phone",
+          candidate_email:  "Email",
+          current_company:  "Current Company",
+          job_location:     "Location",
+          experience_years: "Experience",
+          current_ctc:      "Current CTC",
+          expected_ctc:     "Expected CTC",
+          notice_period:    "Notice Period",
+        };
+
+        const mapping = {
+          candidate_name:   d.name,
+          phone:            d.phone,
+          candidate_email:  d.email,
+          current_company:  d.current_company,
+          job_location:     d.job_location,
+          experience_years: d.experience_years,
+          current_ctc:      d.current_ctc,
+          expected_ctc:     d.expected_ctc,
+          notice_period:    d.notice_period,
+        };
+
+        const filled = [];
+        setForm(prev => {
+          const next = { ...prev };
+          Object.entries(mapping).forEach(([key, val]) => {
+            if (val && String(val).trim() && !prev[key]) {
+              next[key] = String(val).trim();
+              filled.push(FIELD_LABELS[key]);
+            }
+          });
+          return next;
+        });
+        setCvFilled(filled);
+
+        if (filled.length > 0) {
+          addToast(`CV parsed — auto-filled: ${filled.join(", ")}`, "success");
+          // Clear validation errors for filled fields
+          setErrors(prev => {
+            const next = { ...prev };
+            filled.forEach(label => {
+              const key = Object.entries(FIELD_LABELS).find(([, v]) => v === label)?.[0];
+              if (key) delete next[key];
+            });
+            return next;
+          });
+        } else {
+          addToast("CV parsed but no new fields to fill. Check form below.", "info");
+        }
+      } else {
+        // Non-fatal — let user fill manually
+        addToast("CV auto-fill unavailable. Fill the form manually.", "warning");
+      }
+    } catch {
+      addToast("CV parsing error. Fill the form manually.", "warning");
+    } finally {
+      setExtracting(false);
+    }
+  }
+
+  function handleRecording(e) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    if (f.size > MAX_RECORDING_MB * 1024 * 1024) {
+      setErrors(p => ({ ...p, recording: `Max ${MAX_RECORDING_MB}MB` })); return;
+    }
+    setRecording(f);
+    setErrors(p => ({ ...p, recording: null }));
+  }
+
+  const inp = (error) => ({
+    width: "100%", padding: "7px 10px", borderRadius: 6, fontSize: 12,
+    border: `1px solid ${error ? "#dc2626" : "var(--color-border)"}`,
+    background: "var(--color-background)", color: "var(--color-text-primary)",
+    boxSizing: "border-box", outline: "none",
+  });
+  const lbl = { fontSize: 11, fontWeight: 600, color: "var(--color-text-secondary)" };
+
+  /* Helper: is this field auto-filled from CV? */
+  const isCV = (fieldLabel) => cvFilled.includes(fieldLabel);
+  const cvBorder = "1.5px solid #2563eb";
+  const cvBg     = "rgba(37,99,235,0.04)";
+
+  return (
+    <form onSubmit={handleSubmit} style={{ padding: 20 }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: "var(--color-text-primary)", marginBottom: 2 }}>
+        Add Candidate — {req.position_title}
+      </div>
+      <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginBottom: 16 }}>
+        {req.req_id} · {req.department}{req.location ? ` · ${req.location}` : ""}
+      </div>
+
+      {/* ── Step 1: Resume Upload (first) ── */}
+      <Divider label="Step 1 — Upload Resume" />
+      <div style={{ margin: "10px 0 16px" }}>
+        <label style={{
+          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+          gap: 8, padding: "18px 20px", borderRadius: 8, cursor: extracting ? "not-allowed" : "pointer",
+          border: `2px dashed ${errors.resume ? "#dc2626" : resume ? "#16a34a" : "var(--color-primary-300)"}`,
+          background: resume ? "rgba(22,163,74,0.04)" : extracting ? "rgba(37,99,235,0.04)" : "var(--color-background)",
+          transition: "all 200ms",
+        }}>
+          {extracting ? (
+            <>
+              <svg className="animate-spin" viewBox="0 0 24 24" fill="none" stroke="#2563eb" strokeWidth="2.5" width="24" height="24">
+                <path d="M21 12a9 9 0 1 1-6.219-8.56" strokeLinecap="round" />
+              </svg>
+              <span style={{ fontSize: 12, fontWeight: 600, color: "#2563eb" }}>Reading CV with AI…</span>
+              <span style={{ fontSize: 10, color: "var(--color-text-secondary)" }}>Extracting candidate details automatically</span>
+            </>
+          ) : resume ? (
+            <>
+              <svg viewBox="0 0 24 24" fill="none" stroke="#16a34a" strokeWidth="2" width="22" height="22">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+                <line x1="9" y1="13" x2="15" y2="13"/>
+              </svg>
+              <span style={{ fontSize: 12, fontWeight: 700, color: "#15803d" }}>✓ {resume.name}</span>
+              {cvFilled.length > 0 && (
+                <span style={{ fontSize: 10, color: "#2563eb", fontWeight: 600 }}>
+                  ✨ Auto-filled: {cvFilled.join(", ")}
+                </span>
+              )}
+              <span style={{ fontSize: 10, color: "var(--color-text-secondary)" }}>Click to replace</span>
+            </>
+          ) : (
+            <>
+              <svg viewBox="0 0 24 24" fill="none" stroke="var(--color-primary-400)" strokeWidth="1.75" width="28" height="28">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+                <line x1="12" y1="18" x2="12" y2="12"/>
+                <line x1="9" y1="15" x2="15" y2="15"/>
+              </svg>
+              <span style={{ fontSize: 13, fontWeight: 600, color: "var(--color-primary-700)" }}>
+                Upload Resume PDF
+              </span>
+              <span style={{ fontSize: 10, color: "var(--color-text-secondary)" }}>
+                AI will auto-fill name, phone, email, company, experience & CTC · Max {MAX_RESUME_MB}MB
+              </span>
+            </>
+          )}
+          <input type="file" accept=".pdf" onChange={handleResume} disabled={extracting} style={{ display: "none" }} />
+        </label>
+        {errors.resume && <span style={{ fontSize: 10, color: "#dc2626", marginTop: 4, display: "block" }}>{errors.resume}</span>}
+      </div>
+
+      {/* ── Step 2: Candidate Info (shown always, highlighted if CV-filled) ── */}
+      <Divider label="Step 2 — Candidate Information" />
+      {cvFilled.length > 0 && (
+        <div style={{
+          display: "flex", alignItems: "center", gap: 6,
+          background: "rgba(37,99,235,0.06)", border: "1px solid rgba(37,99,235,0.2)",
+          borderRadius: 6, padding: "7px 12px", margin: "8px 0 10px", fontSize: 11, color: "#1d4ed8",
+        }}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="13" height="13">
+            <circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>
           </svg>
+          Fields highlighted in blue were auto-filled from the CV. Verify and correct if needed.
+        </div>
+      )}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, margin: "10px 0 14px" }}>
+        {[
+          { key: "candidate_name",   label: "Full Name",                  req: true,  type: "text",   placeholder: "As on resume",           cvLabel: "Name"     },
+          { key: "phone",            label: "Phone",                      req: true,  type: "tel",    placeholder: "10-digit mobile",        cvLabel: "Phone"    },
+          { key: "candidate_email",  label: "Email",                      req: true,  type: "email",  placeholder: "candidate@email.com",    cvLabel: "Email"    },
+          { key: "current_company",  label: "Current Company",            req: false, type: "text",   placeholder: "Current employer",       cvLabel: "Current Company" },
+          { key: "job_location",     label: "Location",                   req: false, type: "text",   placeholder: "City / Remote",          cvLabel: "Location" },
+          { key: "experience_years", label: "Total Experience (years)",   req: true,  type: "number", placeholder: "e.g. 4.5",               cvLabel: "Experience", extra: { min: "0", max: "50", step: "0.5" } },
+        ].map(f => (
+          <div key={f.key}>
+            <label style={lbl}>
+              {f.label}
+              {f.req && <span style={{ color: "#dc2626" }}> *</span>}
+              {isCV(f.cvLabel) && (
+                <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, color: "#2563eb", background: "rgba(37,99,235,0.1)", padding: "1px 5px", borderRadius: 3 }}>
+                  AI
+                </span>
+              )}
+            </label>
+            <input
+              value={form[f.key]}
+              onChange={e => setField(f.key, e.target.value)}
+              placeholder={f.placeholder}
+              type={f.type}
+              {...(f.extra || {})}
+              style={{
+                ...inp(errors[f.key]), marginTop: 4,
+                border: isCV(f.cvLabel) ? cvBorder : inp(errors[f.key]).border,
+                background: isCV(f.cvLabel) ? cvBg : "var(--color-background)",
+              }}
+            />
+            {errors[f.key] && <span style={{ fontSize: 10, color: "#dc2626" }}>{errors[f.key]}</span>}
+          </div>
+        ))}
+      </div>
+
+      {/* Compensation */}
+      <Divider label="Compensation & Availability" />
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, margin: "10px 0 14px" }}>
+        <div>
+          <label style={lbl}>
+            Current CTC (LPA)
+            {isCV("Current CTC") && <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, color: "#2563eb", background: "rgba(37,99,235,0.1)", padding: "1px 5px", borderRadius: 3 }}>AI</span>}
+          </label>
+          <input value={form.current_ctc} onChange={e => setField("current_ctc", e.target.value)} placeholder="e.g. 8.5" style={{ ...inp(false), marginTop: 4, border: isCV("Current CTC") ? cvBorder : inp(false).border, background: isCV("Current CTC") ? cvBg : "var(--color-background)" }} />
+        </div>
+        <div>
+          <label style={lbl}>
+            Expected CTC (LPA)
+            {isCV("Expected CTC") && <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, color: "#2563eb", background: "rgba(37,99,235,0.1)", padding: "1px 5px", borderRadius: 3 }}>AI</span>}
+          </label>
+          <input value={form.expected_ctc} onChange={e => setField("expected_ctc", e.target.value)} placeholder="e.g. 12" style={{ ...inp(false), marginTop: 4, border: isCV("Expected CTC") ? cvBorder : inp(false).border, background: isCV("Expected CTC") ? cvBg : "var(--color-background)" }} />
+        </div>
+        <div>
+          <label style={lbl}>
+            Notice Period
+            {isCV("Notice Period") && <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, color: "#2563eb", background: "rgba(37,99,235,0.1)", padding: "1px 5px", borderRadius: 3 }}>AI</span>}
+          </label>
+          <select value={form.notice_period} onChange={e => setField("notice_period", e.target.value)} style={{ ...inp(false), marginTop: 4, border: isCV("Notice Period") ? cvBorder : inp(false).border, background: isCV("Notice Period") ? cvBg : "var(--color-background)" }}>
+            <option value="">Select…</option>
+            {NOTICE_OPTIONS.map(o => <option key={o}>{o}</option>)}
+          </select>
+        </div>
+      </div>
+
+      {/* Source */}
+      <Divider label="Source" />
+      <div style={{ margin: "10px 0 14px" }}>
+        <label style={lbl}>Candidate Source <span style={{ color: "#dc2626" }}>*</span></label>
+        <RadioChips options={SOURCES} value={form.source} onChange={v => setField("source", v)} />
+        {errors.source && <span style={{ fontSize: 10, color: "#dc2626", marginTop: 4, display: "block" }}>{errors.source}</span>}
+      </div>
+
+      {/* Recording */}
+      <Divider label="Screening Recording (optional)" />
+      <div style={{ margin: "10px 0 14px" }}>
+        <label style={{
+          display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", borderRadius: 6,
+          cursor: "pointer", border: `1.5px dashed ${errors.recording ? "#dc2626" : "var(--color-border)"}`,
+          background: "var(--color-background)", fontSize: 11,
+          color: recording ? "#15803d" : "var(--color-text-secondary)",
+        }}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" width="16" height="16">
+            <path d="M12 2a3 3 0 0 1 3 3v7a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/>
+          </svg>
+          {recording ? `✓ ${recording.name}` : `Upload call recording · Max ${MAX_RECORDING_MB}MB (audio or video)`}
+          <input type="file" accept="audio/*,video/*" onChange={handleRecording} style={{ display: "none" }} />
+        </label>
+        {errors.recording && <span style={{ fontSize: 10, color: "#dc2626" }}>{errors.recording}</span>}
+      </div>
+
+      {/* Fit Assessment */}
+      <Divider label="Screening Assessment" />
+      <div style={{ margin: "10px 0 14px" }}>
+        <label style={lbl}>Fit Assessment <span style={{ color: "#dc2626" }}>*</span></label>
+        <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+          {FIT_OPTIONS.map(opt => {
+            const sel = form.fit_assessment === opt.value;
+            const cfg = FIT_COLOR[opt.value];
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => setField("fit_assessment", opt.value)}
+                style={{
+                  flex: 1, padding: "9px 0", borderRadius: 6, cursor: "pointer",
+                  fontWeight: 700, fontSize: 12, border: "2px solid",
+                  borderColor: sel ? cfg.border : "var(--color-border)",
+                  background: sel ? cfg.bg : "transparent",
+                  color: sel ? cfg.color : "var(--color-text-secondary)",
+                  transition: "all 150ms",
+                }}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+        {errors.fit_assessment && <span style={{ fontSize: 10, color: "#dc2626" }}>{errors.fit_assessment}</span>}
+      </div>
+
+      <div style={{ marginBottom: 16 }}>
+        <label style={lbl}>Screening Remarks <span style={{ color: "#dc2626" }}>*</span></label>
+        <textarea
+          value={form.screening_remarks}
+          onChange={e => setField("screening_remarks", e.target.value)}
+          rows={4}
+          placeholder="Summarise the screening call — communication, attitude, suitability, any concerns…"
+          style={{
+            ...inp(errors.screening_remarks), marginTop: 4,
+            resize: "vertical", lineHeight: 1.6,
+          }}
+        />
+        {errors.screening_remarks && <span style={{ fontSize: 10, color: "#dc2626" }}>{errors.screening_remarks}</span>}
+      </div>
+
+      <Alert type="info" style={{ marginBottom: 16, fontSize: 11 }}>
+        <strong>SOP §6.4</strong> — After submission the candidate enters the AI Evaluation queue automatically.
+        AI scoring is advisory only; the final decision is made by the Senior HR Executive in Module 4.
+      </Alert>
+
+      <Button type="submit" variant="primary" size="lg" loading={submitting} style={{ width: "100%" }}>
+        {submitting ? "Submitting…" : "Submit Screening"}
+      </Button>
+    </form>
+  );
+}
+
+/* ── Main Page ───────────────────────────────────────────────── */
+export default function ScreeningPage() {
+  const { setFullHeight } = useContext(LayoutContext);
+
+  useLayoutEffect(() => {
+    setFullHeight(true);
+    return () => setFullHeight(false);
+  }, [setFullHeight]);
+
+  const [reqs, setReqs]               = useState([]);
+  const [screenings, setScreenings]   = useState([]);
+  const [reqLoading, setReqLoading]   = useState(true);
+  const [scrLoading, setScrLoading]   = useState(false);
+  const [selectedReq, setSelectedReq] = useState(null);
+  const [rightView, setRightView]     = useState("form");
+  const [selectedCand, setSelectedCand] = useState(null);
+  const [reqSearch, setReqSearch]     = useState("");
+
+  const loadReqs = useCallback(async () => {
+    setReqLoading(true);
+    const res = await getRequisitions();
+    setReqs((res?.rows || []).filter(r => ["Approved", "Hiring in Progress"].includes(r.status)));
+    setReqLoading(false);
+  }, []);
+
+  const loadScreenings = useCallback(async (reqId) => {
+    setScrLoading(true);
+    const res = await getScreenings(reqId);
+    setScreenings(res?.rows || []);
+    setScrLoading(false);
+  }, []);
+
+  useEffect(() => { loadReqs(); }, [loadReqs]);
+
+  function selectReq(req) {
+    setSelectedReq(req);
+    setRightView("form");
+    setSelectedCand(null);
+    loadScreenings(req.req_id);
+  }
+
+  const filteredReqs  = reqs.filter(r => {
+    const q = reqSearch.toLowerCase();
+    return !q ||
+      (r.req_id        || "").toLowerCase().includes(q) ||
+      (r.position_title|| "").toLowerCase().includes(q) ||
+      (r.department    || "").toLowerCase().includes(q);
+  });
+
+  const reqScreenings = screenings.filter(s => s.req_id === selectedReq?.req_id);
+  const candCount     = (reqId) => screenings.filter(s => s.req_id === reqId).length;
+
+  return (
+    <div style={{ display: "flex", height: "100%", overflow: "hidden", background: "var(--color-background)" }}>
+
+      {/* ── Left: Requisition list ─────────────────────────────── */}
+      <div style={{
+        width: 280, flexShrink: 0,
+        borderRight: "1px solid var(--color-border)",
+        display: "flex", flexDirection: "column", overflow: "hidden",
+        background: "var(--color-surface)",
+      }}>
+        <div style={{ padding: "14px 12px 10px", borderBottom: "1px solid var(--color-border)", flexShrink: 0 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "var(--color-text-primary)", marginBottom: 8 }}>
+            Open Positions
+          </div>
           <input
-            className="enterprise-input"
-            style={{ paddingLeft: 28, height: 32, fontSize: 12 }}
-            placeholder="Search candidate, phone, req…"
-            value={search}
-            onChange={e => onSearch(e.target.value)}
+            placeholder="Search…"
+            value={reqSearch}
+            onChange={e => setReqSearch(e.target.value)}
+            style={{
+              width: "100%", padding: "6px 10px", borderRadius: 6, fontSize: 11,
+              border: "1px solid var(--color-border)",
+              background: "var(--color-background)", color: "var(--color-text-primary)",
+              boxSizing: "border-box",
+            }}
           />
         </div>
 
-        {/* Filter by Req */}
-        <select
-          className="enterprise-input"
-          style={{ height: 32, fontSize: 12, minWidth: 160, maxWidth: 220 }}
-          value={filterReq}
-          onChange={e => onFilterReq(e.target.value)}
-        >
-          <option value="">All Requisitions</option>
-          {reqOptions.map(id => (
-            <option key={id} value={id}>{id}</option>
-          ))}
-        </select>
+        <div style={{ flex: 1, overflowY: "auto", padding: "6px 8px" }} className="custom-scrollbar">
+          {reqLoading ? <LoadingPane text="Loading…" /> :
+            filteredReqs.length === 0 ? (
+              <EmptyState title="No open requisitions" body="Approved or Hiring in Progress requisitions appear here." />
+            ) : filteredReqs.map(req => (
+              <ReqCard
+                key={req.req_id}
+                req={req}
+                isActive={selectedReq?.req_id === req.req_id}
+                onClick={selectReq}
+                candidateCount={candCount(req.req_id)}
+              />
+            ))
+          }
+        </div>
 
-        {/* Filter by Fit */}
-        <select
-          className="enterprise-input"
-          style={{ height: 32, fontSize: 12, minWidth: 140 }}
-          value={filterFit}
-          onChange={e => onFilterFit(e.target.value)}
-        >
-          <option value="">All Assessments</option>
-          <option value="Shortlisted">Shortlisted</option>
-          <option value="On Hold">On Hold</option>
-          <option value="Rejected">Rejected</option>
-        </select>
-
-        {/* Clear */}
-        {(search || filterReq || filterFit) && (
-          <button
-            type="button"
-            onClick={() => { onSearch(""); onFilterReq(""); onFilterFit(""); }}
-            className="h-8 px-3 text-xs font-medium rounded-sm"
-            style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)", color: "var(--color-text-secondary)", cursor: "pointer" }}
-          >
-            Clear
-          </button>
-        )}
-
-        <span className="text-xs ml-auto flex-shrink-0" style={{ color: "var(--color-text-secondary)" }}>
-          {filtered.length} of {screenings.length} records
-        </span>
+        <div style={{ padding: "8px 12px", borderTop: "1px solid var(--color-border)", fontSize: 10, color: "var(--color-text-secondary)" }}>
+          {filteredReqs.length} position{filteredReqs.length !== 1 ? "s" : ""}
+        </div>
       </div>
 
-      {/* ── Table / Cards ── */}
-      <div className="flex-1 overflow-y-auto custom-scrollbar">
-        {loading ? (
-          <div className="flex items-center justify-center gap-2 py-20 text-xs" style={{ color: "var(--color-text-secondary)" }}>
-            <svg className="animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
-              <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
-            </svg>
-            Loading screenings…
-          </div>
-        ) : filtered.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-20 gap-2 text-xs" style={{ color: "var(--color-text-secondary)" }}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" width="40" height="40" style={{ color: "var(--color-border)", marginBottom: 4 }}>
-              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
-              <path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
-            </svg>
-            {screenings.length === 0 ? "No screening records yet." : "No records match your filters."}
-          </div>
+      {/* ── Right ─────────────────────────────────────────────────── */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+        {!selectedReq ? (
+          <EmptyState
+            icon={
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" width="56" height="56">
+                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
+                <path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+              </svg>
+            }
+            title="Select a position"
+            body="Choose an open requisition from the left panel to begin candidate screening"
+          />
         ) : (
           <>
-            {/* Desktop table */}
-            <div className="hidden md:block">
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                <thead>
-                  <tr style={{ background: "var(--color-surface)", borderBottom: "2px solid var(--color-border)" }}>
-                    {["Sub ID", "Candidate", "Phone", "Req / Position", "Interviewer", "Exp", "Curr CTC", "Exp CTC", "Assessment", "Current Status", "Date", "Links"].map(h => (
-                      <th
-                        key={h}
-                        style={{
-                          padding: "9px 12px",
-                          textAlign: "left",
-                          fontSize: 11,
-                          fontWeight: 700,
-                          color: "var(--color-text-secondary)",
-                          letterSpacing: "0.04em",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.map((r, idx) => {
-                    const fitStyle = fitColors[r.fit_assessment] || {};
-                    const isExpanded = expandedRec === r.submission_id;
-                    return (
-                      <>
-                        <tr
-                          key={r.submission_id}
-                          onClick={() => onExpand(isExpanded ? null : r.submission_id)}
-                          style={{
-                            background: isExpanded ? "var(--color-primary-50)" : idx % 2 === 0 ? "var(--color-background)" : "var(--color-surface)",
-                            borderBottom: "1px solid var(--color-border)",
-                            cursor: "pointer",
-                            transition: "background 120ms",
-                          }}
-                          onMouseEnter={e => { if (!isExpanded) e.currentTarget.style.background = "var(--color-primary-50)"; }}
-                          onMouseLeave={e => { if (!isExpanded) e.currentTarget.style.background = idx % 2 === 0 ? "var(--color-background)" : "var(--color-surface)"; }}
-                        >
-                          <td style={{ padding: "8px 12px", fontFamily: "monospace", fontWeight: 700, color: "var(--color-primary-700)", whiteSpace: "nowrap", fontSize: 11 }}>
-                            {r.submission_id || "—"}
-                          </td>
-                          <td style={{ padding: "8px 12px", fontWeight: 600, color: "var(--color-text-primary)", whiteSpace: "nowrap" }}>
-                            {r.candidate_name || "—"}
-                          </td>
-                          <td style={{ padding: "8px 12px", color: "var(--color-text-secondary)", whiteSpace: "nowrap" }}>
-                            {r.phone || "—"}
-                          </td>
-                          <td style={{ padding: "8px 12px", whiteSpace: "nowrap" }}>
-                            <div style={{ fontFamily: "monospace", fontSize: 10, fontWeight: 700, color: "var(--color-primary-700)" }}>{r.req_id}</div>
-                            <div style={{ color: "var(--color-text-secondary)", fontSize: 11, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis" }}>{r.position_title}</div>
-                          </td>
-                          <td style={{ padding: "8px 12px", color: "var(--color-text-secondary)", whiteSpace: "nowrap" }}>
-                            {r.interviewer_name || "—"}
-                          </td>
-                          <td style={{ padding: "8px 12px", color: "var(--color-text-secondary)", textAlign: "center" }}>
-                            {r.experience_years ? `${r.experience_years} yr` : "—"}
-                          </td>
-                          <td style={{ padding: "8px 12px", color: "var(--color-text-secondary)", textAlign: "right", whiteSpace: "nowrap" }}>
-                            {r.current_ctc ? `₹${r.current_ctc}L` : "—"}
-                          </td>
-                          <td style={{ padding: "8px 12px", color: "var(--color-text-secondary)", textAlign: "right", whiteSpace: "nowrap" }}>
-                            {r.expected_ctc ? `₹${r.expected_ctc}L` : "—"}
-                          </td>
-                          <td style={{ padding: "8px 12px" }}>
-                            {r.fit_assessment ? (
-                              <span
-                                style={{
-                                  display: "inline-block",
-                                  padding: "2px 8px",
-                                  borderRadius: 3,
-                                  fontSize: 11,
-                                  fontWeight: 700,
-                                  background: fitStyle.bg,
-                                  color: fitStyle.color,
-                                  border: `1px solid ${fitStyle.color}`,
-                                  whiteSpace: "nowrap",
-                                }}
-                              >
-                                {r.fit_assessment}
-                              </span>
-                            ) : "—"}
-                          </td>
-                          {(() => {
-                            const cs = getCurrentStatus(r);
-                            return (
-                              <td style={{ padding: "8px 12px" }}>
-                                <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                                  <span style={{ fontSize: 9, fontWeight: 600, color: "var(--color-text-secondary)", whiteSpace: "nowrap" }}>{cs.module}</span>
-                                  <span style={{
-                                    display: "inline-block", padding: "2px 7px", borderRadius: 3,
-                                    fontSize: 10, fontWeight: 700, whiteSpace: "nowrap",
-                                    background: cs.color.bg, color: cs.color.color, border: `1px solid ${cs.color.color}`,
-                                  }}>
-                                    {cs.label}
-                                  </span>
-                                </div>
-                              </td>
-                            );
-                          })()}
-                          <td style={{ padding: "8px 12px", color: "var(--color-text-secondary)", whiteSpace: "nowrap", fontSize: 11 }}>
-                            {formatDate(r.submitted_at)}
-                          </td>
-                          <td style={{ padding: "8px 12px" }}>
-                            <div className="flex items-center gap-1.5">
-                              {r.resume_link && (
-                                <a
-                                  href={r.resume_link}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  onClick={e => e.stopPropagation()}
-                                  title="View Resume"
-                                  style={{ color: "var(--color-primary-700)", display: "inline-flex" }}
-                                >
-                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="14" height="14">
-                                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                                    <polyline points="14 2 14 8 20 8"/>
-                                  </svg>
-                                </a>
-                              )}
-                              {r.call_recording_link && (
-                                <a
-                                  href={r.call_recording_link}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  onClick={e => e.stopPropagation()}
-                                  title="View Recording"
-                                  style={{ color: "var(--color-primary-700)", display: "inline-flex" }}
-                                >
-                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="14" height="14">
-                                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
-                                    <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
-                                  </svg>
-                                </a>
-                              )}
-                            </div>
-                          </td>
-                        </tr>
-                        {isExpanded && (
-                          <tr key={`${r.submission_id}-exp`} style={{ background: "var(--color-primary-50)", borderBottom: "2px solid var(--color-accent-500)" }}>
-                            <td colSpan={12} style={{ padding: "10px 14px" }}>
-                              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                                {/* Candidate details */}
-                                <div className="grid grid-cols-3 lg:grid-cols-6 gap-x-4 gap-y-2" style={{ fontSize: 11 }}>
-                                  {[
-                                    { label: "Email",         value: r.candidate_email || "—" },
-                                    { label: "Source",        value: r.source || "—" },
-                                    { label: "Company",       value: r.current_company || "—" },
-                                    { label: "Notice Period", value: r.notice_period || "—" },
-                                    { label: "Job Location",  value: r.job_location || "—" },
-                                    { label: "Submitted By",  value: r.submitted_by || "—" },
-                                  ].map(({ label, value }) => (
-                                    <div key={label}>
-                                      <div style={{ fontSize: 9, fontWeight: 700, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 1 }}>{label}</div>
-                                      <div style={{ color: "var(--color-text-primary)", fontWeight: 500 }}>{value}</div>
-                                    </div>
-                                  ))}
-                                </div>
-                                {/* Pipeline */}
-                                <div style={{ borderTop: "1px solid var(--color-border)", paddingTop: 8 }}>
-                                  <div style={{ fontSize: 9, fontWeight: 700, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 4 }}>Candidate Pipeline</div>
-                                  <CandidatePipelineCard
-                                    cand={r}
-                                    interviews={intMap[r.submission_id] || []}
-                                    approval={approvalMap[r.submission_id] || null}
-                                  />
-                                </div>
-                                {/* Screening remarks — below pipeline */}
-                                {r.screening_remarks && (
-                                  <div style={{ borderTop: "1px solid var(--color-border)", paddingTop: 8 }}>
-                                    <div style={{ fontSize: 9, fontWeight: 700, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 4 }}>Screening Remarks</div>
-                                    <div style={{ fontSize: 11, color: "var(--color-text-primary)", lineHeight: 1.5 }}>{r.screening_remarks}</div>
-                                  </div>
-                                )}
-                              </div>
-                            </td>
-                          </tr>
-                        )}
-                      </>
-                    );
-                  })}
-                </tbody>
-              </table>
+            {/* Tabs */}
+            <div style={{
+              display: "flex", borderBottom: "1px solid var(--color-border)",
+              background: "var(--color-surface)", flexShrink: 0, padding: "0 16px",
+            }}>
+              {[
+                { id: "form", label: "Add Candidate" },
+                { id: "list", label: `Screened (${reqScreenings.length})` },
+              ].map(t => (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => { setRightView(t.id); setSelectedCand(null); }}
+                  style={{
+                    padding: "10px 16px", border: "none", borderRadius: 0,
+                    background: "transparent", cursor: "pointer", fontSize: 12,
+                    fontWeight: rightView === t.id ? 700 : 500,
+                    color: rightView === t.id ? "var(--color-primary-800)" : "var(--color-text-secondary)",
+                    borderBottom: rightView === t.id ? "2px solid var(--color-primary-700)" : "2px solid transparent",
+                    marginBottom: -1,
+                  }}
+                >
+                  {t.label}
+                </button>
+              ))}
             </div>
 
-            {/* Mobile cards */}
-            <div className="md:hidden flex flex-col gap-3 p-3">
-              {filtered.map(r => {
-                const fitStyle = fitColors[r.fit_assessment] || {};
-                const isExpanded = expandedRec === r.submission_id;
-                return (
-                  <div
-                    key={r.submission_id}
-                    className="enterprise-card overflow-hidden"
-                    onClick={() => onExpand(isExpanded ? null : r.submission_id)}
-                    style={{ cursor: "pointer", border: isExpanded ? "1.5px solid var(--color-accent-500)" : undefined }}
-                  >
-                    {/* Card header */}
-                    <div className="p-3">
-                      <div className="flex items-start justify-between gap-2 mb-1">
-                        <div>
-                          <div className="font-semibold text-sm" style={{ color: "var(--color-text-primary)" }}>{r.candidate_name || "—"}</div>
-                          <div className="text-xs" style={{ color: "var(--color-text-secondary)" }}>{r.phone || ""}</div>
+            {/* Content */}
+            <div style={{ flex: 1, overflowY: "auto" }} className="custom-scrollbar">
+              {rightView === "form" && (
+                <ScreeningForm
+                  req={selectedReq}
+                  onSuccess={() => loadScreenings(selectedReq.req_id)}
+                />
+              )}
+              {rightView === "list" && (
+                <div style={{ padding: "12px" }}>
+                  {scrLoading ? <LoadingPane text="Loading candidates…" /> :
+                    reqScreenings.length === 0 ? (
+                      <EmptyState
+                        title="No candidates yet"
+                        body="Use Add Candidate to record the first screening for this position."
+                        action={<Button variant="secondary" size="sm" onClick={() => setRightView("form")}>Add Candidate</Button>}
+                      />
+                    ) : selectedCand ? (
+                      <CandidateDetail candidate={selectedCand} onBack={() => setSelectedCand(null)} />
+                    ) : (
+                      <>
+                        <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginBottom: 8, fontWeight: 600 }}>
+                          {reqScreenings.length} candidate{reqScreenings.length !== 1 ? "s" : ""} — {selectedReq.position_title}
                         </div>
-                        <div className="flex flex-col items-end gap-1">
-                          {r.fit_assessment && (
-                            <span style={{ padding: "2px 8px", borderRadius: 3, fontSize: 10, fontWeight: 700, background: fitStyle.bg, color: fitStyle.color, border: `1px solid ${fitStyle.color}`, flexShrink: 0 }}>
-                              {r.fit_assessment}
-                            </span>
-                          )}
-                          {(() => {
-                            const cs = getCurrentStatus(r);
-                            if (cs.label !== r.fit_assessment) return (
-                              <div style={{ display: "flex", flexDirection: "column", gap: 1, flexShrink: 0 }}>
-                                <span style={{ fontSize: 8, fontWeight: 600, color: "var(--color-text-secondary)", whiteSpace: "nowrap" }}>{cs.module}</span>
-                                <span style={{ padding: "2px 7px", borderRadius: 3, fontSize: 9, fontWeight: 700, background: cs.color.bg, color: cs.color.color, border: `1px solid ${cs.color.color}`, whiteSpace: "nowrap" }}>
-                                  {cs.label}
-                                </span>
-                              </div>
-                            );
-                          })()}
-                        </div>
-                      </div>
-                      <div style={{ fontSize: 11, color: "var(--color-primary-700)", fontFamily: "monospace", fontWeight: 700 }}>{r.req_id}</div>
-                      <div style={{ fontSize: 11, color: "var(--color-text-secondary)" }}>{r.position_title}</div>
-                      <div className="flex flex-wrap gap-2 mt-2" style={{ fontSize: 11 }}>
-                        {r.experience_years && <span style={{ color: "var(--color-text-secondary)" }}>Exp: <strong>{r.experience_years} yr</strong></span>}
-                        {r.current_ctc && <span style={{ color: "var(--color-text-secondary)" }}>CTC: <strong>₹{r.current_ctc}L</strong></span>}
-                        {r.expected_ctc && <span style={{ color: "var(--color-text-secondary)" }}>Exp CTC: <strong>₹{r.expected_ctc}L</strong></span>}
-                      </div>
-                    </div>
-                    {/* Expanded details + pipeline */}
-                    {isExpanded && (
-                      <div style={{ borderTop: "1px solid var(--color-border)", padding: "8px 12px", background: "var(--color-primary-50)" }}>
-                        <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 mb-2" style={{ fontSize: 11 }}>
-                          {[
-                            { label: "Interviewer", value: r.interviewer_name },
-                            { label: "Source",      value: r.source },
-                            { label: "Company",     value: r.current_company },
-                            { label: "Notice",      value: r.notice_period },
-                            { label: "Location",    value: r.job_location },
-                            { label: "Email",       value: r.candidate_email },
-                            { label: "Date",        value: formatDate(r.submitted_at) },
-                            { label: "By",          value: r.submitted_by },
-                          ].map(({ label, value }) => value ? (
-                            <div key={label}>
-                              <div style={{ fontWeight: 700, color: "var(--color-text-secondary)", fontSize: 9 }}>{label}</div>
-                              <div style={{ color: "var(--color-text-primary)" }}>{value}</div>
-                            </div>
-                          ) : null)}
-                        </div>
-                        {/* Pipeline */}
-                        <div style={{ fontSize: 9, fontWeight: 700, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 4 }}>Pipeline</div>
-                        <CandidatePipelineCard
-                          cand={r}
-                          interviews={intMap[r.submission_id] || []}
-                          approval={approvalMap[r.submission_id] || null}
-                        />
-                        {/* Screening remarks — below pipeline */}
-                        {r.screening_remarks && (
-                          <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--color-border)" }}>
-                            <div style={{ fontSize: 9, fontWeight: 700, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 3 }}>Screening Remarks</div>
-                            <div style={{ fontSize: 11, color: "var(--color-text-primary)", lineHeight: 1.5 }}>{r.screening_remarks}</div>
-                          </div>
-                        )}
-                        {(r.resume_link || r.call_recording_link) && (
-                          <div className="flex gap-2 mt-3">
-                            {r.resume_link && (
-                              <a href={r.resume_link} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()}
-                                className="h-7 px-3 text-xs font-semibold rounded-sm flex items-center gap-1"
-                                style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)", color: "var(--color-primary-700)", textDecoration: "none" }}>
-                                📄 Resume
-                              </a>
-                            )}
-                            {r.call_recording_link && (
-                              <a href={r.call_recording_link} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()}
-                                className="h-7 px-3 text-xs font-semibold rounded-sm flex items-center gap-1"
-                                style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)", color: "var(--color-primary-700)", textDecoration: "none" }}>
-                                🎙 Recording
-                              </a>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
+                        {reqScreenings.map((c, i) => (
+                          <CandidateRow key={c.submission_id || i} c={c} onSelect={setSelectedCand} />
+                        ))}
+                      </>
+                    )
+                  }
+                </div>
+              )}
             </div>
           </>
         )}
       </div>
-    </div>
-  );
-}
-
-/* ─── Candidate Pipeline Status ─────────────────────────────── */
-
-const STAGE_COLOR = {
-  Shortlisted:    { color: "#16a34a", bg: "rgba(22,163,74,0.12)"  },
-  "On Hold":      { color: "#d97706", bg: "rgba(217,119,6,0.12)"  },
-  Rejected:       { color: "#dc2626", bg: "rgba(198,40,40,0.12)"  },
-  "Move Forward": { color: "#16a34a", bg: "rgba(22,163,74,0.12)"  },
-  Selected:       { color: "#6366f1", bg: "rgba(99,102,241,0.12)" },
-  "Not Selected": { color: "#dc2626", bg: "rgba(198,40,40,0.12)"  },
-  Hold:           { color: "#d97706", bg: "rgba(217,119,6,0.12)"  },
-  Approved:       { color: "#16a34a", bg: "rgba(22,163,74,0.12)"  },
-  Pending:        { color: "#94a3b8", bg: "rgba(148,163,184,0.10)"},
-};
-
-function stageDot(value) {
-  const s = STAGE_COLOR[value] || STAGE_COLOR["Pending"];
-  return s;
-}
-
-function PipelineBadge({ label, small }) {
-  const s = STAGE_COLOR[label] || STAGE_COLOR["Pending"];
-  return (
-    <span style={{
-      display: "inline-block",
-      padding: small ? "1px 5px" : "2px 7px",
-      borderRadius: 3, fontSize: small ? 9 : 10,
-      fontWeight: 700, background: s.bg, color: s.color,
-      border: `1px solid ${s.color}`,
-      whiteSpace: "nowrap",
-    }}>{label || "Pending"}</span>
-  );
-}
-
-function CandidatePipelineCard({ cand, interviews, approval }) {
-  const rounds = [...interviews].sort((a, b) => {
-    const n = s => parseInt((s || "").replace(/\D/g, "") || "0");
-    return n(a.interview_round) - n(b.interview_round);
-  });
-  const approvalDecision = approval?.decision || null;
-
-  // Collapse rounds into a single Interview stage
-  const interviewDone = rounds.length > 0 && rounds.every(r => !!r.final_decision);
-  const interviewRejected = rounds.some(r => r.final_decision === "Not Selected");
-  const interviewValue = interviewRejected ? "Not Selected" : interviewDone ? "Selected" : null;
-
-  // Build ordered stages
-  const stages = [
-    {
-      key: "screening",
-      icon: "S",
-      label: "Screening",
-      sublabel: null,
-      value: cand.fit_assessment || null,
-      done: !!cand.fit_assessment,
-      rejected: cand.fit_assessment === "Rejected",
-    },
-    {
-      key: "interview",
-      icon: "I",
-      label: "Interview",
-      sublabel: null,
-      value: interviewValue,
-      done: interviewDone,
-      rejected: interviewRejected,
-      rounds,
-    },
-    {
-      key: "offer",
-      icon: "✓",
-      label: "Offer Decision",
-      sublabel: approval ? `by ${approval.approved_by}` : null,
-      value: approvalDecision,
-      done: !!approvalDecision,
-      rejected: approvalDecision === "Rejected",
-      isOffer: true,
-    },
-  ];
-
-  // Determine the "active" stage index (first incomplete)
-  const activeIdx = stages.findIndex(s => !s.done);
-
-  function nodeStyle(stage, idx) {
-    const isPast   = stage.done;
-    const isActive = !stage.done && idx === activeIdx;
-    if (stage.rejected) return { bg: "#dc2626", border: "#dc2626", text: "#fff" };
-    if (isPast) {
-      const c = STAGE_COLOR[stage.value] || { color: "#16a34a", bg: "#16a34a" };
-      return { bg: c.color, border: c.color, text: "#fff" };
-    }
-    if (isActive) return { bg: "#fff", border: "var(--color-primary-700)", text: "var(--color-primary-700)" };
-    return { bg: "var(--color-surface)", border: "var(--color-border)", text: "var(--color-text-secondary)" };
-  }
-
-  function lineColor(idx) {
-    // line after stage idx — colored if stage idx is done
-    if (stages[idx]?.done && !stages[idx]?.rejected) {
-      const c = STAGE_COLOR[stages[idx].value] || { color: "#16a34a" };
-      return c.color;
-    }
-    if (stages[idx]?.rejected) return "#dc2626";
-    return "var(--color-border)";
-  }
-
-  return (
-    <div style={{ width: "100%", padding: "4px 0", overflowX: "auto" }}>
-      <div style={{ display: "flex", alignItems: "flex-start", minWidth: 280 }}>
-        {stages.map((stage, idx) => {
-          const ns = nodeStyle(stage, idx);
-          const isLast = idx === stages.length - 1;
-          const badgeStyle = STAGE_COLOR[stage.value] || STAGE_COLOR["Pending"];
-          return (
-            <React.Fragment key={stage.key}>
-              {/* Stage node */}
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0, minWidth: 60, maxWidth: 90 }}>
-                {/* Circle */}
-                <div style={{
-                  width: 28, height: 28, borderRadius: "50%",
-                  background: ns.bg, border: `2px solid ${ns.border}`,
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  fontSize: stage.isOffer ? 12 : 11, fontWeight: 800,
-                  color: ns.text, boxShadow: stage.done ? `0 0 0 2px ${ns.border}22` : "none",
-                  flexShrink: 0, position: "relative", zIndex: 1,
-                }}>
-                  {stage.done && !stage.rejected
-                    ? <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" width="13" height="13"><polyline points="20 6 9 17 4 12"/></svg>
-                    : stage.rejected
-                    ? <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" width="11" height="11"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                    : stage.icon}
-                </div>
-                {/* Stage label */}
-                <div style={{ marginTop: 5, fontSize: 9, fontWeight: 700, color: "var(--color-text-primary)", textAlign: "center", whiteSpace: "nowrap", maxWidth: 84, overflow: "hidden", textOverflow: "ellipsis" }}>
-                  {stage.label}{stage.isFinal ? " 🏁" : ""}
-                </div>
-                {/* Sub-label (remarks / round description / by whom) */}
-                {stage.sublabel && (
-                  <div style={{ fontSize: 9, color: "var(--color-text-secondary)", textAlign: "center", maxWidth: 84, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 1 }} title={stage.sublabel}>
-                    {stage.sublabel}
-                  </div>
-                )}
-                {/* Value badge */}
-                {stage.value ? (
-                  <div style={{ marginTop: 3 }}>
-                    <span style={{
-                      display: "inline-block", padding: "1px 5px", borderRadius: 3,
-                      fontSize: 9, fontWeight: 700, whiteSpace: "nowrap",
-                      background: badgeStyle.bg, color: badgeStyle.color, border: `1px solid ${badgeStyle.color}`,
-                    }}>{stage.value}</span>
-                  </div>
-                ) : (
-                  <div style={{ marginTop: 3 }}>
-                    <span style={{ fontSize: 9, color: "var(--color-text-secondary)", fontStyle: "italic" }}>Pending</span>
-                  </div>
-                )}
-                {/* Rounds list — only for Interview stage */}
-                {stage.rounds && stage.rounds.length > 0 && (
-                  <div style={{ marginTop: 5, display: "flex", flexDirection: "column", gap: 3, alignItems: "flex-start", minWidth: 110, maxWidth: 160 }}>
-                    {stage.rounds.map((r, i) => {
-                      const isFinal = r.is_final_round === true || String(r.is_final_round).toLowerCase() === "true";
-                      const rb = STAGE_COLOR[r.final_decision] || STAGE_COLOR["Pending"];
-                      return (
-                        <div key={r.interview_id || i} style={{ display: "flex", alignItems: "center", gap: 4, width: "100%" }}>
-                          <span style={{ fontSize: 8, fontWeight: 700, color: "var(--color-text-secondary)", flexShrink: 0 }}>{i + 1}.</span>
-                          <span style={{ fontSize: 9, color: "var(--color-text-primary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1 }}>
-                            {r.round_description || r.interview_round || `Round ${i + 1}`}{isFinal ? " 🏁" : ""}
-                          </span>
-                          {r.final_decision && (
-                            <span style={{ padding: "0 4px", borderRadius: 2, fontSize: 8, fontWeight: 700, whiteSpace: "nowrap", background: rb.bg, color: rb.color, border: `1px solid ${rb.color}`, flexShrink: 0 }}>
-                              {r.final_decision}
-                            </span>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-
-              {/* Connector line */}
-              {!isLast && (
-                <div style={{
-                  flex: 1, height: 2, marginTop: 13, borderRadius: 2,
-                  background: lineColor(idx),
-                  transition: "background 0.3s",
-                  minWidth: 16,
-                }} />
-              )}
-            </React.Fragment>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-/* ─── Main Page ──────────────────────────────────────────────── */
-
-export default function ScreeningPage() {
-  const { user } = useAuth();
-
-  const [reqs, setReqs]                       = useState([]);
-  const [loadingReqs, setLoadingReqs]         = useState(true);
-  const [selected, setSelected]               = useState(null);
-  const [screeningCounts, setScreeningCounts] = useState({});
-  const [form, setForm]                       = useState(EMPTY_FORM);
-  const [errors, setErrors]                   = useState({});
-  const [saving, setSaving]                   = useState(false);
-  const [success, setSuccess]                 = useState(null);
-  const [submitError, setSubmitError]         = useState("");
-  const [resumeFile, setResumeFile]           = useState(null);
-  const [recordingFile, setRecordingFile]     = useState(null);
-
-  const [activeTab, setActiveTab]         = useState("form");   // "form" | "records" | "status"
-  const [allScreenings, setAllScreenings] = useState([]);
-  const [loadingRecs, setLoadingRecs]     = useState(false);
-  const [recSearch, setRecSearch]         = useState("");
-  const [recFilterReq, setRecFilterReq]   = useState("");
-  const [recFilterFit, setRecFilterFit]   = useState("");
-  const [expandedRec, setExpandedRec]     = useState(null);
-
-  const [allInterviews, setAllInterviews] = useState([]);
-  const [allApprovals,  setAllApprovals]  = useState([]);
-
-  /* ── Load requisitions + screening counts on mount ── */
-  useEffect(() => {
-    loadData();
-  }, []);
-
-  async function loadData() {
-    setLoadingReqs(true);
-    const [reqRes, scrRes] = await Promise.all([
-      getRequisitions(),
-      getScreenings(),
-    ]);
-
-    if (reqRes?.rows) {
-      const eligible = reqRes.rows.filter(
-        r => r.status === "Approved" || r.status === "Hiring in Progress"
-      );
-      setReqs(eligible);
-    }
-
-    if (scrRes?.rows) {
-      const counts = {};
-      scrRes.rows.forEach(r => {
-        counts[r.req_id] = (counts[r.req_id] || 0) + 1;
-      });
-      setScreeningCounts(counts);
-      setAllScreenings(scrRes.rows);
-    }
-
-    setLoadingReqs(false);
-  }
-
-  async function loadRecords() {
-    setLoadingRecs(true);
-    const [scrRes, intRes, aprRes] = await Promise.all([
-      getScreenings(), getInterviews(), getApprovals(),
-    ]);
-    if (scrRes?.rows) {
-      setAllScreenings(scrRes.rows);
-      const counts = {};
-      scrRes.rows.forEach(r => { counts[r.req_id] = (counts[r.req_id] || 0) + 1; });
-      setScreeningCounts(counts);
-    }
-    if (intRes?.rows) setAllInterviews(intRes.rows);
-    if (aprRes?.rows) setAllApprovals(aprRes.rows);
-    setLoadingRecs(false);
-  }
-
-  /* ── Select a requisition ── */
-  function handleSelectReq(req) {
-    setSelected(req);
-    setForm({ ...EMPTY_FORM, job_location: req.location || "" });
-    setErrors({});
-    setSuccess(null);
-    setSubmitError("");
-    setResumeFile(null);
-    setRecordingFile(null);
-  }
-
-  /* ── Field setter ── */
-  function setF(k, v) {
-    setForm(f => ({ ...f, [k]: v }));
-    if (errors[k]) setErrors(e => ({ ...e, [k]: null }));
-  }
-
-  /* ── Validation ── */
-  function validate() {
-    const e = {};
-    if (!form.interviewer_name)  e.interviewer_name  = "Select an interviewer";
-    if (!form.source)            e.source            = "Select a source";
-    if (!form.candidate_name.trim()) e.candidate_name = "Required";
-    if (!form.phone.trim())      e.phone             = "Required";
-    if (!form.experience_years.trim()) e.experience_years = "Required";
-    if (!form.fit_assessment)    e.fit_assessment    = "Select a fit assessment";
-    if (!form.job_location.trim()) e.job_location    = "Required";
-    if (!form.notice_period)     e.notice_period     = "Select notice period";
-    if (!form.current_ctc.trim()) e.current_ctc      = "Required";
-    if (!form.expected_ctc.trim()) e.expected_ctc    = "Required";
-    setErrors(e);
-    return Object.keys(e).length === 0;
-  }
-
-  /* ── Submit ── */
-  async function handleSubmit(e) {
-    e.preventDefault();
-    if (!validate()) {
-      // Scroll to first error
-      const firstErr = document.querySelector("[data-field-error]");
-      if (firstErr) firstErr.scrollIntoView({ behavior: "smooth", block: "center" });
-      return;
-    }
-    setSaving(true);
-    setSubmitError("");
-
-    try {
-      const payload = {
-        req_id:           selected.req_id,
-        position_title:   selected.position_title,
-        interviewer_name: form.interviewer_name,
-        candidate_name:   form.candidate_name.trim(),
-        phone:            form.phone.trim(),
-        candidate_email:  form.candidate_email.trim(),
-        experience_years: form.experience_years.trim(),
-        source:           form.source,
-        current_company:  form.current_company.trim(),
-        job_location:     form.job_location.trim(),
-        notice_period:    form.notice_period,
-        current_ctc:      form.current_ctc.trim(),
-        expected_ctc:     form.expected_ctc.trim(),
-        screening_remarks: form.screening_remarks.trim(),
-        fit_assessment:   form.fit_assessment,
-        submitted_by:     user?.email || "",
-      };
-
-      // Resume
-      if (resumeFile) {
-        payload.resume_base64 = await readFile(resumeFile);
-        payload.resume_ext    = getFileExt(resumeFile);
-        payload.resume_mime   = resumeFile.type || "application/octet-stream";
-      }
-
-      // Call recording
-      if (recordingFile) {
-        payload.recording_base64 = await readFile(recordingFile);
-        payload.recording_ext    = getFileExt(recordingFile);
-        payload.recording_mime   = recordingFile.type || "audio/mpeg";
-      }
-
-      const res = await submitScreening(payload);
-
-      // Require both success:true AND a submission_id — proves the sheet row was written
-      if (!res?.success || !res?.submission_id) {
-        throw new Error(res?.error || "Submission failed — data was not saved to the sheet. Check GAS deployment.");
-      }
-
-      // Reload from sheet to reflect actual stored data
-      const freshData = await getScreenings();
-      if (freshData?.rows) {
-        setAllScreenings(freshData.rows);
-        const counts = {};
-        freshData.rows.forEach(r => { counts[r.req_id] = (counts[r.req_id] || 0) + 1; });
-        setScreeningCounts(counts);
-      }
-
-      setSuccess({
-        submission_id:       res.submission_id,
-        candidate_name:      form.candidate_name.trim(),
-        fit_assessment:      form.fit_assessment,
-        resume_link:         res.resume_link || "",
-        call_recording_link: res.call_recording_link || "",
-        req_id:              selected.req_id,
-        position_title:      selected.position_title,
-      });
-    } catch (err) {
-      setSubmitError(err.message || "Could not save. Check your connection and try again.");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  /* ── Screen Another (same req) ── */
-  function handleScreenAnother() {
-    setSuccess(null);
-    setForm({ ...EMPTY_FORM, job_location: selected?.location || "" });
-    setErrors({});
-    setSubmitError("");
-    setResumeFile(null);
-    setRecordingFile(null);
-  }
-
-  /* ─── Success screen ─────────────────────────────────────── */
-  if (success) {
-    return (
-      <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
-        <div
-          className="flex items-center px-3 sm:px-6 flex-shrink-0"
-          style={{ background: "var(--color-primary-900)", borderBottom: "1px solid rgba(255,255,255,0.07)", height: 56 }}
-        >
-          <h1 className="text-sm font-bold text-white">Screening Submitted</h1>
-        </div>
-        <div className="flex items-center justify-center p-4 sm:p-8 custom-scrollbar" style={{ flex: 1, overflowY: "auto" }}>
-          <div className="enterprise-card p-6 sm:p-10 text-center max-w-lg w-full">
-            {/* Success icon */}
-            <div className="flex items-center justify-center mb-4">
-              <div
-                className="flex items-center justify-center rounded-full"
-                style={{ width: 52, height: 52, background: "rgba(46,125,50,0.1)" }}
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="#16a34a" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" width="26" height="26">
-                  <polyline points="20 6 9 17 4 12"/>
-                </svg>
-              </div>
-            </div>
-            <h2 className="text-lg font-bold mb-1" style={{ color: "var(--color-success)" }}>
-              Screening Recorded
-            </h2>
-            <p className="text-sm mb-5" style={{ color: "var(--color-text-secondary)" }}>
-              Candidate screening has been saved successfully.
-            </p>
-
-            {/* Submission ID */}
-            <div
-              className="inline-block px-5 py-3 rounded-sm mb-4"
-              style={{ background: "var(--color-primary-50)", border: "1px solid var(--color-border)" }}
-            >
-              <div className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: "var(--color-text-secondary)" }}>
-                Submission ID
-              </div>
-              <div className="font-mono text-xl font-extrabold" style={{ color: "var(--color-primary-700)" }}>
-                {success.submission_id}
-              </div>
-            </div>
-
-            {/* Summary chips */}
-            <div className="flex flex-wrap justify-center gap-2 mb-4">
-              {[
-                { l: "Candidate", v: success.candidate_name },
-                { l: "Requisition", v: success.req_id },
-                { l: "Position", v: success.position_title },
-              ].map(({ l, v }) => (
-                <div
-                  key={l}
-                  className="px-3 py-1.5 rounded-sm text-xs"
-                  style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)" }}
-                >
-                  <span style={{ color: "var(--color-text-secondary)" }}>{l}: </span>
-                  <span className="font-semibold" style={{ color: "var(--color-text-primary)" }}>{v}</span>
-                </div>
-              ))}
-            </div>
-
-            {/* Fit assessment badge */}
-            <div className="flex justify-center mb-5">
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-semibold" style={{ color: "var(--color-text-secondary)" }}>
-                  Assessment:
-                </span>
-                <FitBadge value={success.fit_assessment} />
-              </div>
-            </div>
-
-            {/* Drive links */}
-            {(success.resume_link || success.call_recording_link) && (
-              <div
-                className="rounded-sm p-4 mb-5 flex flex-wrap justify-center gap-2"
-                style={{ background: "var(--color-primary-50)", border: "1px solid var(--color-border)" }}
-              >
-                {success.resume_link && (
-                  <a
-                    href={success.resume_link}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-1.5 h-8 px-3 text-xs font-semibold rounded-sm"
-                    style={{
-                      background: "var(--color-surface)",
-                      border: "1px solid var(--color-border)",
-                      color: "var(--color-primary-700)",
-                      textDecoration: "none",
-                    }}
-                  >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="13" height="13">
-                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                      <polyline points="14 2 14 8 20 8"/>
-                    </svg>
-                    View Resume
-                  </a>
-                )}
-                {success.call_recording_link && (
-                  <a
-                    href={success.call_recording_link}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-1.5 h-8 px-3 text-xs font-semibold rounded-sm"
-                    style={{
-                      background: "var(--color-surface)",
-                      border: "1px solid var(--color-border)",
-                      color: "var(--color-primary-700)",
-                      textDecoration: "none",
-                    }}
-                  >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="13" height="13">
-                      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
-                      <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
-                      <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
-                    </svg>
-                    View Recording
-                  </a>
-                )}
-              </div>
-            )}
-
-            {/* Actions */}
-            <div className="flex flex-col sm:flex-row gap-3 justify-center">
-              <button
-                onClick={handleScreenAnother}
-                className="h-9 px-5 text-sm font-semibold rounded-sm"
-                style={{
-                  background: "var(--color-surface)",
-                  border: "1px solid var(--color-border)",
-                  color: "var(--color-text-primary)",
-                  cursor: "pointer",
-                }}
-              >
-                Screen Another Candidate
-              </button>
-              <button
-                onClick={() => {
-                  alert(`All screenings for ${success.req_id} — ${success.position_title}\n\nSubmission ID: ${success.submission_id}\n\nRefresh the page to see updated counts in the left panel.`);
-                }}
-                className="h-9 px-5 text-sm font-semibold rounded-sm text-white"
-                style={{ background: "var(--color-primary-800)", border: "none", cursor: "pointer" }}
-              >
-                View All Screenings for this Req
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  /* ─── Main layout ────────────────────────────────────────── */
-  const inputCls    = "enterprise-input";
-  const textareaCls = "enterprise-input h-auto py-2";
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
-      {/* ── Header ── */}
-      <div
-        className="flex items-center justify-between px-3 sm:px-6 flex-shrink-0"
-        style={{ background: "var(--color-primary-900)", borderBottom: "1px solid rgba(255,255,255,0.07)", height: 56 }}
-      >
-        {/* Left: title + tabs */}
-        <div className="flex items-center gap-4 min-w-0">
-          <div className="min-w-0 hidden sm:block">
-            <h1 className="text-sm font-bold text-white leading-tight">Candidate Screening</h1>
-          </div>
-          <div className="flex items-center gap-1">
-            {[
-              { key: "form",    label: "New Screening" },
-              { key: "records", label: "Records" },
-            ].map(tab => (
-              <button
-                key={tab.key}
-                type="button"
-                onClick={() => {
-                  setActiveTab(tab.key);
-                  if (tab.key === "records") loadRecords();
-                }}
-                className="h-7 px-3 text-xs font-semibold rounded-sm transition-all"
-                style={{
-                  background: activeTab === tab.key ? "rgba(200,169,81,0.25)" : "rgba(255,255,255,0.07)",
-                  color: activeTab === tab.key ? "var(--color-accent-500)" : "rgba(255,255,255,0.6)",
-                  border: activeTab === tab.key ? "1px solid rgba(200,169,81,0.4)" : "1px solid rgba(255,255,255,0.1)",
-                  cursor: "pointer",
-                }}
-              >
-                {tab.label}
-                {tab.key === "records" && allScreenings.length > 0 && (
-                  <span
-                    className="ml-1.5 px-1 rounded-sm font-bold"
-                    style={{ fontSize: 9, background: "var(--color-accent-500)", color: "#fff" }}
-                  >
-                    {allScreenings.length}
-                  </span>
-                )}
-              </button>
-            ))}
-          </div>
-        </div>
-        {/* Right: refresh */}
-        <button
-          onClick={() => { loadData(); if (activeTab === "records") loadRecords(); }}
-          className="flex items-center gap-1.5 h-7 px-3 text-xs font-medium rounded-sm flex-shrink-0"
-          style={{ background: "rgba(255,255,255,0.07)", color: "rgba(255,255,255,0.65)", border: "1px solid rgba(255,255,255,0.1)", cursor: "pointer" }}
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="13" height="13">
-            <polyline points="23 4 23 10 17 10"/>
-            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-          </svg>
-          Refresh
-        </button>
-      </div>
-
-      {activeTab === "form" ? (
-        /* ── Two-panel layout — fills remaining viewport height ── */
-        <div style={{ flex: 1, overflow: "hidden", display: "flex" }}>
-
-            {/* ── Left panel: requisition list (hidden on mobile when req selected) ── */}
-            <div
-              className={`flex-shrink-0 flex flex-col gap-2 custom-scrollbar ${selected ? "hidden md:flex" : "flex"}`}
-              style={{
-                width: "min(272px, 100%)",
-                overflowY: "auto",
-                borderRight: "1px solid var(--color-border)",
-                padding: "14px 12px",
-                background: "var(--color-background)",
-              }}
-            >
-              <div className="flex items-center gap-1.5 mb-2 flex-wrap">
-                <span
-                  className="text-xs font-bold uppercase"
-                  style={{ color: "var(--color-text-secondary)", letterSpacing: "0.08em" }}
-                >
-                  Approved Requisitions
-                </span>
-                {!loadingReqs && (
-                  <span
-                    className="px-1.5 py-0.5 rounded-sm font-semibold"
-                    style={{
-                      fontSize: 10,
-                      background: "var(--color-primary-50)",
-                      color: "var(--color-primary-700)",
-                      border: "1px solid var(--color-border)",
-                    }}
-                  >
-                    {reqs.length} available
-                  </span>
-                )}
-              </div>
-
-              {loadingReqs ? (
-                <div
-                  className="enterprise-card p-6 text-center text-xs flex items-center justify-center gap-2"
-                  style={{ color: "var(--color-text-secondary)" }}
-                >
-                  <svg className="animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14">
-                    <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
-                  </svg>
-                  Loading…
-                </div>
-              ) : reqs.length === 0 ? (
-                <div
-                  className="enterprise-card p-6 text-center text-xs"
-                  style={{ color: "var(--color-text-secondary)" }}
-                >
-                  <div className="text-2xl mb-2">📋</div>
-                  No approved requisitions yet.
-                </div>
-              ) : (
-                reqs.map(req => {
-                  const isActive = selected?.req_id === req.req_id;
-                  const count = screeningCounts[req.req_id] || 0;
-                  return (
-                    <button
-                      key={req.req_id}
-                      onClick={() => handleSelectReq(req)}
-                      className="text-left rounded-sm transition-all p-3 w-full"
-                      style={{
-                        background: "var(--color-surface)",
-                        border: `2px solid ${isActive ? "var(--color-accent-500)" : "var(--color-border)"}`,
-                        boxShadow: isActive ? "0 0 0 1px var(--color-accent-500)" : "none",
-                        cursor: "pointer",
-                      }}
-                    >
-                      <div className="flex items-start justify-between gap-1 mb-0.5">
-                        <div
-                          className="font-mono text-xs font-bold"
-                          style={{ color: "var(--color-primary-700)" }}
-                        >
-                          {req.req_id}
-                        </div>
-                        {count > 0 && (
-                          <span
-                            className="flex-shrink-0 text-xs font-bold px-1.5 py-0.5 rounded-sm"
-                            style={{
-                              background: "var(--color-accent-500)",
-                              color: "#fff",
-                              fontSize: 10,
-                              lineHeight: "1.4",
-                            }}
-                          >
-                            {count} screened
-                          </span>
-                        )}
-                      </div>
-                      <div
-                        className="text-sm font-semibold leading-tight mb-0.5"
-                        style={{ color: "var(--color-text-primary)" }}
-                      >
-                        {req.position_title}
-                      </div>
-                      <div className="text-xs" style={{ color: "var(--color-text-secondary)" }}>
-                        {req.department}{req.department && req.location ? " · " : ""}{req.location}
-                      </div>
-                      <div className="flex items-center gap-1.5 mt-1">
-                        <span
-                          className="text-xs px-1.5 py-0.5 rounded-sm font-medium"
-                          style={{
-                            background: req.status === "Approved" ? "rgba(22,163,74,0.1)" : "rgba(12,84,96,0.1)",
-                            color: req.status === "Approved" ? "var(--color-success)" : "#0c5460",
-                            fontSize: 10,
-                          }}
-                        >
-                          {req.status}
-                        </span>
-                      </div>
-                    </button>
-                  );
-                })
-              )}
-            </div>
-
-            {/* ── Right panel: form or placeholder ── */}
-            <div className="flex-1 min-w-0 custom-scrollbar" style={{ overflowY: "auto", padding: "16px 20px" }}>
-              {/* Mobile back button — only visible when req is selected */}
-              {selected && (
-                <button
-                  type="button"
-                  onClick={() => { setSelected(null); setForm(EMPTY_FORM); setErrors({}); setSubmitError(""); setResumeFile(null); setRecordingFile(null); }}
-                  className="md:hidden flex items-center gap-1.5 text-xs font-semibold mb-3"
-                  style={{ color: "var(--color-primary-700)", background: "none", border: "none", cursor: "pointer", padding: 0 }}
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" width="14" height="14"><polyline points="15 18 9 12 15 6"/></svg>
-                  Back to requisitions
-                </button>
-              )}
-              {!selected ? (
-                <div
-                  className="enterprise-card flex flex-col items-center justify-center text-center py-20 px-8"
-                  style={{ color: "var(--color-text-secondary)", minHeight: 320 }}
-                >
-                  <svg
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    width="48"
-                    height="48"
-                    style={{ color: "var(--color-border)", marginBottom: 16 }}
-                  >
-                    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
-                    <circle cx="9" cy="7" r="4"/>
-                    <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
-                    <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
-                  </svg>
-                  <p className="text-sm font-semibold mb-1" style={{ color: "var(--color-text-primary)" }}>
-                    Select a requisition to begin screening
-                  </p>
-                  <p className="text-xs">
-                    Choose an approved or in-progress requisition from the left panel.
-                  </p>
-                </div>
-              ) : (
-                <form onSubmit={handleSubmit} noValidate className="flex flex-col gap-4 pb-4">
-
-                  {/* ── Section 1: Interviewer & Req Info ── */}
-                  <div className="enterprise-card overflow-hidden">
-                    <SectionHeader>Screening Session Info</SectionHeader>
-                    <div className="p-3 md:p-4 grid grid-cols-1 sm:grid-cols-2 gap-3 md:gap-4">
-
-                      {/* Req ID (read-only) */}
-                      <Field label="Requisition ID">
-                        <div
-                          className="enterprise-input text-sm font-mono font-bold"
-                          style={{ color: "var(--color-primary-700)", opacity: 0.75, cursor: "not-allowed", userSelect: "none" }}
-                        >
-                          {selected.req_id}
-                        </div>
-                      </Field>
-
-                      {/* Position (read-only) */}
-                      <Field label="Position Screened For">
-                        <div className="enterprise-input text-sm" style={{ opacity: 0.75, cursor: "not-allowed", userSelect: "none" }}>
-                          {selected.position_title}
-                        </div>
-                      </Field>
-
-                      {/* Interviewer Name (radio) */}
-                      <div className="col-span-1 sm:col-span-2">
-                        <Field
-                          label="Interviewer Name"
-                          required
-                          error={errors.interviewer_name}
-                        >
-                          <div data-field-error={errors.interviewer_name ? "1" : undefined}>
-                            <RadioChips
-                              options={INTERVIEWERS}
-                              value={form.interviewer_name}
-                              onChange={v => setF("interviewer_name", v)}
-                            />
-                          </div>
-                        </Field>
-                      </div>
-
-                    </div>
-                  </div>
-
-                  {/* ── Section 2: Candidate Info ── */}
-                  <div className="enterprise-card overflow-hidden">
-                    <SectionHeader>Candidate Information</SectionHeader>
-                    <div className="p-3 md:p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 md:gap-4">
-
-                      <Field label="Candidate Name" required error={errors.candidate_name}>
-                        <input
-                          className={inputCls}
-                          value={form.candidate_name}
-                          onChange={e => setF("candidate_name", e.target.value)}
-                          placeholder="Full name of candidate"
-                          data-field-error={errors.candidate_name ? "1" : undefined}
-                        />
-                      </Field>
-
-                      <Field label="Phone Number" required error={errors.phone}>
-                        <input
-                          className={inputCls}
-                          value={form.phone}
-                          onChange={e => setF("phone", e.target.value)}
-                          placeholder="10-digit mobile number"
-                          inputMode="tel"
-                          data-field-error={errors.phone ? "1" : undefined}
-                        />
-                      </Field>
-
-                      <Field label="Email ID" error={errors.candidate_email}>
-                        <input
-                          className={inputCls}
-                          type="email"
-                          value={form.candidate_email}
-                          onChange={e => setF("candidate_email", e.target.value)}
-                          placeholder="candidate@email.com"
-                        />
-                      </Field>
-
-                      <Field
-                        label="Total Years of Experience"
-                        required
-                        error={errors.experience_years}
-                      >
-                        <input
-                          className={inputCls}
-                          value={form.experience_years}
-                          onChange={e => setF("experience_years", e.target.value)}
-                          placeholder="e.g. 3.5"
-                          data-field-error={errors.experience_years ? "1" : undefined}
-                        />
-                      </Field>
-
-                      <div className="col-span-1 sm:col-span-2 lg:col-span-2">
-                        <Field label="Current Company, Designation & Working Since">
-                          <textarea
-                            className={textareaCls}
-                            rows={2}
-                            value={form.current_company}
-                            onChange={e => setF("current_company", e.target.value)}
-                            placeholder="e.g. ABC Logistics, Warehouse Supervisor, Jan 2022"
-                          />
-                        </Field>
-                      </div>
-
-                    </div>
-                  </div>
-
-                  {/* ── Section 3: Source ── */}
-                  <div className="enterprise-card overflow-hidden">
-                    <SectionHeader>Source of Candidate</SectionHeader>
-                    <div className="p-3 md:p-4">
-                      <Field label="Source" required error={errors.source}>
-                        <div data-field-error={errors.source ? "1" : undefined}>
-                          <RadioChips
-                            options={SOURCES}
-                            value={form.source}
-                            onChange={v => setF("source", v)}
-                          />
-                        </div>
-                      </Field>
-                    </div>
-                  </div>
-
-                  {/* ── Section 4: Job Details ── */}
-                  <div className="enterprise-card overflow-hidden">
-                    <SectionHeader>Job & Compensation Details</SectionHeader>
-                    <div className="p-3 md:p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 md:gap-4">
-
-                      <Field label="Job Location" required error={errors.job_location}>
-                        <input
-                          className={inputCls}
-                          value={form.job_location}
-                          readOnly
-                          style={{ opacity: 0.7, cursor: "not-allowed" }}
-                        />
-                      </Field>
-
-                      <Field label="Current CTC in Lakhs" required error={errors.current_ctc}>
-                        <input
-                          className={inputCls}
-                          value={form.current_ctc}
-                          onChange={e => setF("current_ctc", e.target.value)}
-                          placeholder="e.g. 4.5"
-                          data-field-error={errors.current_ctc ? "1" : undefined}
-                        />
-                      </Field>
-
-                      <Field label="Expected CTC in Lakhs" required error={errors.expected_ctc}>
-                        <input
-                          className={inputCls}
-                          value={form.expected_ctc}
-                          onChange={e => setF("expected_ctc", e.target.value)}
-                          placeholder="e.g. 6"
-                          data-field-error={errors.expected_ctc ? "1" : undefined}
-                        />
-                      </Field>
-
-                      {/* Notice Period */}
-                      <div className="col-span-1 sm:col-span-2 lg:col-span-3">
-                        <Field label="Notice Period" required error={errors.notice_period}>
-                          <div data-field-error={errors.notice_period ? "1" : undefined}>
-                            <RadioChips
-                              options={NOTICE_OPTIONS}
-                              value={form.notice_period}
-                              onChange={v => setF("notice_period", v)}
-                            />
-                          </div>
-                        </Field>
-                      </div>
-
-                    </div>
-                  </div>
-
-                  {/* ── Section 5: Screening Outcome ── */}
-                  <div className="enterprise-card overflow-hidden">
-                    <SectionHeader>Screening Outcome</SectionHeader>
-                    <div className="p-3 md:p-4 flex flex-col gap-4">
-
-                      <Field label="Screening Remarks">
-                        <textarea
-                          className={textareaCls}
-                          rows={3}
-                          value={form.screening_remarks}
-                          onChange={e => setF("screening_remarks", e.target.value)}
-                          placeholder="Observations, strengths, concerns, notes from the screening call…"
-                        />
-                      </Field>
-
-                      <Field
-                        label="Overall Candidate Fit Assessment"
-                        required
-                        error={errors.fit_assessment}
-                      >
-                        <div data-field-error={errors.fit_assessment ? "1" : undefined}>
-                          <FitChips
-                            value={form.fit_assessment}
-                            onChange={v => setF("fit_assessment", v)}
-                          />
-                        </div>
-                      </Field>
-
-                    </div>
-                  </div>
-
-                  {/* ── Section 6: Documents ── */}
-                  <div className="enterprise-card overflow-hidden">
-                    <SectionHeader>Documents (Optional)</SectionHeader>
-                    <div className="p-3 md:p-4 grid grid-cols-1 sm:grid-cols-2 gap-3 md:gap-4">
-
-                      <Field
-                        label="Upload Resume"
-                        hint="PDF, DOC, or DOCX · Max 5 MB"
-                      >
-                        <FileDropZone
-                          id="resume-upload"
-                          accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                          maxMB={MAX_RESUME_MB}
-                          file={resumeFile}
-                          onChange={setResumeFile}
-                          label="Click to upload Resume"
-                        />
-                      </Field>
-
-                      <Field
-                        label="Upload Call Recording"
-                        hint="MP3, MP4, WAV or any audio · Max 15 MB"
-                      >
-                        <FileDropZone
-                          id="recording-upload"
-                          accept="audio/*,.mp3,.mp4,.wav,.m4a,.ogg"
-                          maxMB={MAX_RECORDING_MB}
-                          file={recordingFile}
-                          onChange={setRecordingFile}
-                          label="Click to upload Recording"
-                        />
-                      </Field>
-
-                    </div>
-                  </div>
-
-                  {/* ── Submit bar ── */}
-                  <div className="flex flex-col gap-2 pb-2">
-                    {submitError && (
-                      <div
-                        className="text-xs px-3 py-2 rounded-sm font-medium"
-                        style={{
-                          background: "rgba(198,40,40,0.08)",
-                          color: "var(--color-danger)",
-                          border: "1px solid rgba(198,40,40,0.2)",
-                        }}
-                      >
-                        ⚠ {submitError}
-                      </div>
-                    )}
-                    <div className="flex flex-col-reverse sm:flex-row justify-end gap-2 sm:gap-3">
-                      <button
-                        type="button"
-                        onClick={() => { setSelected(null); setSuccess(null); setForm(EMPTY_FORM); setErrors({}); setSubmitError(""); setResumeFile(null); setRecordingFile(null); }}
-                        className="h-9 px-5 text-sm font-semibold rounded-sm"
-                        style={{
-                          background: "var(--color-surface)",
-                          border: "1px solid var(--color-border)",
-                          color: "var(--color-text-primary)",
-                          cursor: "pointer",
-                        }}
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        type="submit"
-                        disabled={saving}
-                        className="h-9 px-5 text-sm font-semibold rounded-sm text-white disabled:opacity-60"
-                        style={{
-                          background: "var(--color-primary-800)",
-                          border: "none",
-                          cursor: saving ? "not-allowed" : "pointer",
-                        }}
-                      >
-                        {saving ? (
-                          <span className="flex items-center gap-2">
-                            <svg className="animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14">
-                              <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
-                            </svg>
-                            Submitting…
-                          </span>
-                        ) : (
-                          "Submit Screening →"
-                        )}
-                      </button>
-                    </div>
-                  </div>
-
-                </form>
-              )}
-            </div>
-
-        </div>
-      ) : (
-        /* ── Records tab ── */
-        <ScreeningRecords
-          screenings={allScreenings}
-          interviews={allInterviews}
-          approvals={allApprovals}
-          loading={loadingRecs}
-          reqs={reqs}
-          search={recSearch}
-          onSearch={setRecSearch}
-          filterReq={recFilterReq}
-          onFilterReq={setRecFilterReq}
-          filterFit={recFilterFit}
-          onFilterFit={setRecFilterFit}
-          expandedRec={expandedRec}
-          onExpand={setExpandedRec}
-        />
-      )}
     </div>
   );
 }

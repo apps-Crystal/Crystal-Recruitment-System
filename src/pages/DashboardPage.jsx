@@ -1,228 +1,299 @@
-import React, { useEffect, useState } from "react";
+/**
+ * Dashboard — SOP-HR-001
+ * Shows requisition KPIs + candidate pipeline stage breakdown.
+ * Visible to all authenticated roles (read-only overview).
+ */
+import React, { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
-import { getRequisitions, getScreenings } from "../utils/api";
-import { canRaise, canApprove } from "../utils/rbac";
+import { getRequisitions, getScreenings, getCandidates } from "../utils/api";
+import { canRaise, canApproveReq, STAGES } from "../utils/rbac";
+import { PageHeader, Card, ReqStatusBadge, Badge, Spinner } from "../components/ui";
 
-const STATUS_CFG = {
-  "Pending Approval":  { bg: "rgba(245,124,0,0.10)",  color: "#d97706",  dot: "#f59e0b" },
-  "Approved":          { bg: "rgba(46,125,50,0.10)",  color: "#16a34a",  dot: "#22c55e" },
-  "Rejected":          { bg: "rgba(198,40,40,0.10)",  color: "#dc2626",  dot: "#ef4444" },
-  "Changes Requested": { bg: "rgba(245,124,0,0.10)",  color: "#d97706",  dot: "#f59e0b" },
-  "Hiring in Progress":{ bg: "rgba(72,101,129,0.12)", color: "#486581",  dot: "#627d98" },
-  "Closed":            { bg: "rgba(90,106,122,0.10)", color: "#5a6a7a",  dot: "#9fb3c8" },
-  "Draft":             { bg: "rgba(224,228,237,0.6)", color: "#5a6a7a",  dot: "#bcccdc" },
-};
-
-function StatusBadge({ status }) {
-  const c = STATUS_CFG[status] || STATUS_CFG["Draft"];
-  return (
-    <span
-      className="inline-flex items-center gap-1.5 text-xs font-semibold px-2 py-0.5 rounded-sm whitespace-nowrap"
-      style={{ background: c.bg, color: c.color }}
-    >
-      <span style={{ width: 5, height: 5, borderRadius: "50%", background: c.dot, display: "inline-block", flexShrink: 0 }} />
-      {status}
-    </span>
-  );
-}
-
-const Icons = {
-  total:   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" width="18" height="18"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/><line x1="12" y1="12" x2="12" y2="16"/><line x1="10" y1="14" x2="14" y2="14"/></svg>,
-  pending: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" width="18" height="18"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>,
+/* ── Icons ───────────────────────────────────────────────────── */
+const I = {
+  refresh: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" width="13" height="13"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>,
+  plus:    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="12" height="12"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>,
+  check:   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="12" height="12"><polyline points="20 6 9 17 4 12"/></svg>,
+  req:     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" width="18" height="18"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/></svg>,
+  clock:   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" width="18" height="18"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>,
   active:  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" width="18" height="18"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>,
-  closed:  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" width="18" height="18"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>,
+  closed:  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" width="18" height="18"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>,
   tat:     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" width="18" height="18"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>,
-  refresh: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" width="14" height="14"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>,
-  raise:   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" width="14" height="14"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>,
-  approve: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" width="14" height="14"><polyline points="20 6 9 17 4 12"/></svg>,
+  cand:    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" width="18" height="18"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
 };
 
-const TABS = ["ALL", "Pending Approval", "Approved", "Hiring in Progress", "Closed", "Rejected"];
+/* ── SOP pipeline stage config (§3.1) ────────────────────────── */
+const PIPELINE_STAGES = [
+  { key: "SCREENING",      label: "Screening",      color: "#2563eb", bg: "#dbeafe" },
+  { key: "AI_EVALUATION",  label: "AI Evaluation",  color: "#7c3aed", bg: "#ede9fe" },
+  { key: "HR_DECISION",    label: "HR Decision",    color: "#d97706", bg: "#fef3c7" },
+  { key: "INTERVIEW",      label: "Interview",      color: "#059669", bg: "#d1fae5" },
+  { key: "DOCUMENTS",      label: "Documents",      color: "#db2777", bg: "#fce7f3" },
+  { key: "OFFER_APPROVAL", label: "Offer Approval", color: "#ea580c", bg: "#fff7ed" },
+  { key: "OFFER_RELEASED", label: "Offer Released", color: "#047857", bg: "#ecfdf5" },
+  { key: "ONBOARDING",     label: "Onboarding",     color: "#15803d", bg: "#f0fdf4" },
+  { key: "COMPLETED",      label: "Completed",      color: "#15803d", bg: "#dcfce7" },
+];
+
+const RECENT_TABS = ["ALL", "Pending Approval", "Approved", "Hiring in Progress", "Closed"];
 
 export default function DashboardPage() {
-  const { user } = useAuth();
-  const navigate = useNavigate();
-  const [rows, setRows] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [tab, setTab] = useState("ALL");
-  const [screeningCounts, setScreeningCounts] = useState({});
+  const { user }   = useAuth();
+  const navigate   = useNavigate();
+  const [rows, setRows]               = useState([]);
+  const [candidates, setCandidates]   = useState([]);
+  const [loading, setLoading]         = useState(true);
+  const [tab, setTab]                 = useState("ALL");
 
-  useEffect(() => { loadData(); }, []);
-
-  async function loadData() {
+  const load = useCallback(async () => {
     setLoading(true);
-    const [res, scrRes] = await Promise.all([getRequisitions(), getScreenings()]);
-    if (res?.rows?.length) setRows(res.rows);
-    if (scrRes?.rows) {
-      const counts = {};
-      scrRes.rows.forEach(r => { counts[r.req_id] = (counts[r.req_id] || 0) + 1; });
-      setScreeningCounts(counts);
-    }
+    const [rRes, cRes] = await Promise.all([getRequisitions(), getCandidates()]);
+    setRows(rRes?.rows || []);
+    setCandidates(cRes?.rows || cRes?.candidates || []);
     setLoading(false);
-  }
+  }, []);
 
-  const counts = {
-    total:   rows.length,
-    pending: rows.filter(r => r.status === "Pending Approval").length,
-    active:  rows.filter(r => ["Approved", "Hiring in Progress"].includes(r.status)).length,
-    closed:  rows.filter(r => r.status === "Closed").length,
-    avgTat: (() => {
+  useEffect(() => { load(); }, [load]);
+
+  /* ── KPIs ── */
+  const kpi = {
+    total:    rows.length,
+    pending:  rows.filter(r => r.status === "Pending Approval").length,
+    active:   rows.filter(r => ["Approved", "Hiring in Progress"].includes(r.status)).length,
+    closed:   rows.filter(r => r.status === "Closed").length,
+    avgTat:   (() => {
       const c = rows.filter(r => r.tat_days && Number(r.tat_days) > 0);
-      return c.length ? Math.round(c.reduce((s, r) => s + Number(r.tat_days), 0) / c.length) + " days" : "—";
+      return c.length ? `${Math.round(c.reduce((s, r) => s + Number(r.tat_days), 0) / c.length)}d` : "—";
     })(),
+    totalCand: candidates.length,
   };
 
-  const pipelineStages = [
-    { label: "Total",            count: counts.total,   color: "var(--color-primary-600)" },
-    { label: "Pending Approval", count: counts.pending, color: "#d97706" },
-    { label: "Active",           count: counts.active,  color: "var(--color-primary-500)" },
-    { label: "Closed",           count: counts.closed,  color: "#16a34a" },
-  ];
+  /* ── Candidate stage counts ── */
+  const stageCounts = {};
+  candidates.forEach(c => {
+    const s = c.stage || c.Stage || "SCREENING";
+    stageCounts[s] = (stageCounts[s] || 0) + 1;
+  });
+  const maxStageCount = Math.max(...Object.values(stageCounts), 1);
 
-  const filtered = tab === "ALL" ? rows : rows.filter(r => r.status === tab);
+  /* ── Recent requisitions ── */
+  const filtered = (tab === "ALL" ? rows : rows.filter(r => r.status === tab))
+    .slice(0, 10);
 
   return (
     <div>
-      {/* ── Page Header ── */}
+      {/* ── Header ── */}
       <div
-        className="sticky top-0 z-10 flex items-center justify-between px-3 sm:px-6"
+        className="sticky top-0 z-10 flex items-center justify-between px-4 md:px-6"
         style={{ background: "var(--color-primary-900)", borderBottom: "1px solid rgba(255,255,255,0.07)", height: 56 }}
       >
         <div className="min-w-0">
-          <h1 className="text-sm font-bold text-white leading-none truncate">Requisition Dashboard</h1>
+          <h1 className="text-sm font-bold text-white leading-none">Hiring Dashboard</h1>
           <p className="text-xs mt-0.5 hidden sm:block" style={{ color: "rgba(255,255,255,0.45)" }}>
-            Welcome back, {user?.name?.split(" ")[0]} · {new Date().toLocaleDateString("en-IN", { day:"numeric", month:"short", year:"numeric" })}
+            Welcome, {user?.name?.split(" ")[0]} · {new Date().toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
           </p>
         </div>
-
-        <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0">
-          {/* Refresh — icon only on xs */}
+        <div className="flex items-center gap-2 flex-shrink-0">
           <button
-            onClick={loadData}
-            className="flex items-center gap-1.5 h-7 px-2 sm:px-3 text-xs font-medium rounded-sm transition-colors"
-            style={{ background: "rgba(255,255,255,0.07)", color: "rgba(255,255,255,0.65)", border: "1px solid rgba(255,255,255,0.1)", cursor: "pointer" }}
-            onMouseEnter={e => e.currentTarget.style.background = "rgba(255,255,255,0.13)"}
-            onMouseLeave={e => e.currentTarget.style.background = "rgba(255,255,255,0.07)"}
-            title="Refresh"
+            onClick={load}
+            style={{
+              display: "flex", alignItems: "center", gap: 5,
+              height: 30, padding: "0 10px",
+              background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.12)",
+              borderRadius: 6, color: "rgba(255,255,255,0.7)", fontSize: 11, cursor: "pointer",
+            }}
           >
-            {Icons.refresh}
+            {I.refresh}
             <span className="hidden sm:inline">Refresh</span>
           </button>
-
           {canRaise(user?.role) && (
             <button
               onClick={() => navigate("/raise")}
-              className="flex items-center gap-1.5 h-7 px-2 sm:px-3 text-xs font-semibold rounded-sm transition-colors"
-              style={{ background: "var(--color-accent-500)", color: "var(--color-primary-900)", border: "none", cursor: "pointer" }}
-              onMouseEnter={e => e.currentTarget.style.background = "var(--color-accent-600)"}
-              onMouseLeave={e => e.currentTarget.style.background = "var(--color-accent-500)"}
+              style={{
+                display: "flex", alignItems: "center", gap: 5,
+                height: 30, padding: "0 14px",
+                background: "var(--color-accent-500)", border: "none",
+                borderRadius: 6, color: "var(--color-primary-900)",
+                fontSize: 11, fontWeight: 700, cursor: "pointer",
+              }}
             >
-              {Icons.raise}
-              <span className="hidden xs:inline sm:inline">Raise</span>
-              <span className="hidden md:inline"> Requisition</span>
+              {I.plus} New Requisition
             </button>
           )}
-
-          {canApprove(user?.role) && (
+          {canApproveReq(user?.role) && kpi.pending > 0 && (
             <button
               onClick={() => navigate("/approve")}
-              className="flex items-center gap-1.5 h-7 px-2 sm:px-3 text-xs font-semibold rounded-sm transition-colors"
-              style={{ background: "rgba(255,255,255,0.12)", color: "#fff", border: "1px solid rgba(255,255,255,0.22)", cursor: "pointer" }}
-              onMouseEnter={e => e.currentTarget.style.background = "rgba(255,255,255,0.2)"}
-              onMouseLeave={e => e.currentTarget.style.background = "rgba(255,255,255,0.12)"}
+              style={{
+                display: "flex", alignItems: "center", gap: 5,
+                height: 30, padding: "0 12px",
+                background: "rgba(255,255,255,0.12)", border: "1px solid rgba(255,255,255,0.22)",
+                borderRadius: 6, color: "#fff", fontSize: 11, fontWeight: 600, cursor: "pointer",
+              }}
             >
-              {Icons.approve}
-              <span className="hidden sm:inline">Approve</span>
-              {counts.pending > 0 && (
-                <span className="inline-flex items-center justify-center rounded-full font-bold" style={{ width: 16, height: 16, background: "#ef4444", color: "#fff", fontSize: 9 }}>
-                  {counts.pending}
-                </span>
-              )}
+              {I.check} Approve
+              <span style={{
+                minWidth: 16, height: 16, borderRadius: "50%", padding: "0 3px",
+                background: "#ef4444", color: "#fff", fontSize: 9, fontWeight: 800,
+                display: "inline-flex", alignItems: "center", justifyContent: "center",
+              }}>
+                {kpi.pending}
+              </span>
             </button>
           )}
         </div>
       </div>
 
-      {/* ── Body ── */}
-      <div className="p-3 md:p-6 flex flex-col gap-4 md:gap-5">
+      <div className="p-4 md:p-6 flex flex-col gap-5">
 
-        {/* ── KPI Cards — 2 cols mobile, 3 cols sm, 5 cols lg ── */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 md:gap-3">
-          {[
-            { label: "Total Requisitions", value: counts.total,   icon: Icons.total,   accent: "var(--color-primary-700)", iconBg: "rgba(72,101,129,0.1)"  },
-            { label: "Pending Approval",   value: counts.pending, icon: Icons.pending, accent: "#d97706",                  iconBg: "rgba(245,124,0,0.1)"   },
-            { label: "Active / Approved",  value: counts.active,  icon: Icons.active,  accent: "var(--color-primary-600)", iconBg: "rgba(72,101,129,0.1)"  },
-            { label: "Positions Closed",   value: counts.closed,  icon: Icons.closed,  accent: "#16a34a",                  iconBg: "rgba(46,125,50,0.1)"   },
-            { label: "Average TAT",        value: counts.avgTat,  icon: Icons.tat,     accent: "var(--color-accent-500)",  iconBg: "rgba(200,169,81,0.1)"  },
-          ].map(c => (
-            <div key={c.label} className="enterprise-card px-3 md:px-4 py-3 md:py-3.5 flex items-start justify-between">
-              <div className="min-w-0">
-                <p className="text-xs font-medium leading-none mb-1.5 md:mb-2" style={{ color: "var(--color-text-secondary)" }}>{c.label}</p>
-                <div className="text-xl md:text-2xl font-extrabold leading-none" style={{ color: c.accent }}>{c.value}</div>
-              </div>
-              <div className="flex items-center justify-center rounded-sm flex-shrink-0 ml-2" style={{ width: 32, height: 32, background: c.iconBg, color: c.accent }}>
-                {c.icon}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {/* ── Pipeline Strip ── */}
-        <div className="enterprise-card px-4 md:px-5 py-3 md:py-4">
-          <div className="flex items-center justify-between mb-3">
-            <p className="text-xs font-bold uppercase tracking-widest" style={{ color: "var(--color-text-secondary)", letterSpacing: "0.08em" }}>Requisition Pipeline</p>
-            <p className="text-xs" style={{ color: "var(--color-text-secondary)" }}>{rows.length} total</p>
+        {/* ── Requisition KPIs ── */}
+        <div>
+          <div className="text-xs font-bold uppercase tracking-widest mb-3" style={{ color: "var(--color-text-secondary)", letterSpacing: "0.08em" }}>
+            Requisition Overview
           </div>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            {pipelineStages.map(s => (
-              <div key={s.label}>
-                <div className="flex items-end justify-between mb-1">
-                  <span className="text-xs truncate" style={{ color: "var(--color-text-secondary)" }}>{s.label}</span>
-                  <span className="text-sm font-bold ml-1 flex-shrink-0" style={{ color: s.color }}>{s.count}</span>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+            {[
+              { label: "Total Requisitions", value: kpi.total,    icon: I.req,    accent: "var(--color-primary-700)", iconBg: "rgba(72,101,129,0.1)"  },
+              { label: "Pending Approval",   value: kpi.pending,  icon: I.clock,  accent: "#d97706",                  iconBg: "rgba(245,124,0,0.1)"   },
+              { label: "Active / Approved",  value: kpi.active,   icon: I.active, accent: "var(--color-primary-600)", iconBg: "rgba(72,101,129,0.1)"  },
+              { label: "Closed",             value: kpi.closed,   icon: I.closed, accent: "#16a34a",                  iconBg: "rgba(46,125,50,0.1)"   },
+              { label: "Avg. TAT",           value: kpi.avgTat,   icon: I.tat,    accent: "var(--color-accent-500)",  iconBg: "rgba(200,169,81,0.1)"  },
+              { label: "Total Candidates",   value: kpi.totalCand,icon: I.cand,   accent: "#7c3aed",                  iconBg: "rgba(124,58,237,0.08)" },
+            ].map(k => (
+              <Card key={k.label} style={{ padding: "12px 14px", display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
+                <div className="min-w-0">
+                  <p style={{ fontSize: 10, fontWeight: 600, color: "var(--color-text-secondary)", marginBottom: 6, lineHeight: 1.3 }}>{k.label}</p>
+                  <div style={{ fontSize: 22, fontWeight: 800, color: k.accent, lineHeight: 1 }}>
+                    {loading ? <Spinner size={18} color={k.accent} /> : k.value}
+                  </div>
                 </div>
-                <div className="rounded-sm overflow-hidden" style={{ height: 4, background: "var(--color-border)" }}>
-                  <div
-                    className="h-full rounded-sm transition-all"
-                    style={{ width: counts.total ? `${Math.round((s.count / counts.total) * 100)}%` : "0%", background: s.color }}
-                  />
+                <div style={{ width: 32, height: 32, borderRadius: 6, background: k.iconBg, color: k.accent, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginLeft: 8 }}>
+                  {k.icon}
                 </div>
-              </div>
+              </Card>
             ))}
           </div>
         </div>
 
-        {/* ── Status Tabs + Table ── */}
-        <div className="enterprise-card overflow-hidden">
-          {/* Tab bar */}
-          <div
-            className="flex items-center px-1 sm:px-2 overflow-x-auto custom-scrollbar"
-            style={{ borderBottom: "1px solid var(--color-border)", background: "var(--color-surface)" }}
-          >
-            {TABS.map(t => {
+        {/* ── Candidate Pipeline — SOP §3.1 stages ── */}
+        <Card style={{ padding: "16px 20px" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+            <div className="text-xs font-bold uppercase tracking-widest" style={{ color: "var(--color-text-secondary)", letterSpacing: "0.08em" }}>
+              Candidate Pipeline — SOP §3.1
+            </div>
+            <span style={{ fontSize: 11, color: "var(--color-text-secondary)" }}>
+              {kpi.totalCand} candidate{kpi.totalCand !== 1 ? "s" : ""} in system
+            </span>
+          </div>
+
+          {loading ? (
+            <div style={{ display: "flex", gap: 10, padding: "12px 0" }}>
+              {PIPELINE_STAGES.map(s => (
+                <div key={s.key} style={{ flex: 1, height: 60, borderRadius: 6, background: "var(--color-border)", animation: "pulse 1.5s ease infinite" }} />
+              ))}
+            </div>
+          ) : (
+            <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+              {PIPELINE_STAGES.map((stage, i) => {
+                const count = stageCounts[stage.key] || 0;
+                const pct   = maxStageCount ? Math.max((count / maxStageCount) * 80, count > 0 ? 12 : 4) : 4;
+                return (
+                  <div key={stage.key} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+                    {/* Count */}
+                    <div style={{ fontSize: 13, fontWeight: 800, color: count > 0 ? stage.color : "var(--color-text-secondary)" }}>
+                      {count}
+                    </div>
+                    {/* Bar */}
+                    <div style={{ width: "100%", height: 80, position: "relative", display: "flex", alignItems: "flex-end" }}>
+                      <div style={{
+                        width: "100%", borderRadius: "4px 4px 0 0",
+                        background: count > 0 ? stage.bg : "var(--color-border)",
+                        border: count > 0 ? `1px solid ${stage.color}33` : "none",
+                        height: `${pct}px`,
+                        transition: "height 0.6s ease",
+                      }} />
+                    </div>
+                    {/* Label */}
+                    <div style={{
+                      fontSize: 9, textAlign: "center", fontWeight: count > 0 ? 700 : 400,
+                      color: count > 0 ? stage.color : "var(--color-text-secondary)",
+                      lineHeight: 1.3, maxWidth: 56,
+                    }}>
+                      {stage.label}
+                    </div>
+                    {/* Step number */}
+                    <div style={{
+                      width: 16, height: 16, borderRadius: "50%",
+                      background: count > 0 ? stage.color : "var(--color-border)",
+                      color: count > 0 ? "#fff" : "var(--color-text-secondary)",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      fontSize: 8, fontWeight: 700,
+                    }}>
+                      {i + 1}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Rejected row */}
+          {!loading && (
+            <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--color-border)", display: "flex", alignItems: "center", gap: 8 }}>
+              <Badge color="#991b1b" bg="#fee2e2">
+                Rejected: {stageCounts["REJECTED"] || 0}
+              </Badge>
+              <span style={{ fontSize: 11, color: "var(--color-text-secondary)" }}>
+                candidates removed from pipeline
+              </span>
+            </div>
+          )}
+        </Card>
+
+        {/* ── Recent Requisitions ── */}
+        <Card style={{ overflow: "hidden" }}>
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            padding: "12px 16px", borderBottom: "1px solid var(--color-border)",
+          }}>
+            <div className="text-xs font-bold uppercase tracking-widest" style={{ color: "var(--color-text-secondary)", letterSpacing: "0.08em" }}>
+              Recent Requisitions
+            </div>
+            <button
+              onClick={() => navigate("/requisitions")}
+              style={{
+                fontSize: 11, color: "var(--color-primary-700)", background: "none",
+                border: "none", cursor: "pointer", fontWeight: 600,
+              }}
+            >
+              View all →
+            </button>
+          </div>
+
+          {/* Tab strip */}
+          <div style={{ display: "flex", borderBottom: "1px solid var(--color-border)", padding: "0 8px", overflowX: "auto" }}>
+            {RECENT_TABS.map(t => {
               const cnt = t === "ALL" ? rows.length : rows.filter(r => r.status === t).length;
               return (
                 <button
                   key={t}
                   onClick={() => setTab(t)}
-                  className="flex items-center gap-1 sm:gap-1.5 px-2 sm:px-4 py-2.5 sm:py-3 text-xs font-semibold whitespace-nowrap transition-colors relative flex-shrink-0"
                   style={{
-                    background: "none", border: "none", cursor: "pointer",
+                    padding: "8px 12px", border: "none", borderRadius: 0, fontSize: 11,
+                    fontWeight: tab === t ? 700 : 500, cursor: "pointer", background: "transparent",
+                    whiteSpace: "nowrap",
                     color: tab === t ? "var(--color-primary-800)" : "var(--color-text-secondary)",
                     borderBottom: tab === t ? "2px solid var(--color-primary-700)" : "2px solid transparent",
                     marginBottom: -1,
                   }}
                 >
                   {t}
-                  <span
-                    className="inline-flex items-center justify-center rounded-full"
-                    style={{
-                      minWidth: 16, height: 16, padding: "0 4px",
-                      background: tab === t ? "var(--color-primary-100)" : "var(--color-border)",
-                      color: tab === t ? "var(--color-primary-800)" : "var(--color-text-secondary)",
-                      fontSize: 9, fontWeight: 700,
-                    }}
-                  >
+                  <span style={{
+                    marginLeft: 5, padding: "1px 5px", borderRadius: 8,
+                    background: tab === t ? "var(--color-primary-100)" : "var(--color-border)",
+                    color: tab === t ? "var(--color-primary-800)" : "var(--color-text-secondary)",
+                    fontSize: 9, fontWeight: 700,
+                  }}>
                     {cnt}
                   </span>
                 </button>
@@ -232,86 +303,48 @@ export default function DashboardPage() {
 
           {/* Table */}
           {loading ? (
-            <div className="flex items-center justify-center py-16 text-sm" style={{ color: "var(--color-text-secondary)" }}>
-              <svg className="animate-spin mr-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
-              Loading requisitions…
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: 32, gap: 10, color: "var(--color-text-secondary)", fontSize: 13 }}>
+              <Spinner size={16} /> Loading…
+            </div>
+          ) : filtered.length === 0 ? (
+            <div style={{ padding: "32px 16px", textAlign: "center", fontSize: 12, color: "var(--color-text-secondary)" }}>
+              No requisitions in this status.
             </div>
           ) : (
-            <div className="overflow-x-auto custom-scrollbar">
-              <table className="w-full" style={{ borderCollapse: "collapse" }}>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                 <thead>
-                  <tr style={{ borderBottom: "1px solid var(--color-border)" }}>
-                    {[
-                      { h: "Req ID",        w: 130 },
-                      { h: "Position",      w: 160 },
-                      { h: "Department",    w: 100 },
-                      { h: "Location",      w: 130 },
-                      { h: "Nos",           w: 44  },
-                      { h: "POC",           w: 110 },
-                      { h: "Status",        w: 150 },
-                      { h: "Raised On",     w: 95  },
-                      { h: "Approval Date", w: 105 },
-                      { h: "Closed Date",   w: 95  },
-                      { h: "TAT",           w: 60  },
-                    ].map(({ h, w }) => (
-                      <th
-                        key={h}
-                        className="text-left text-xs font-semibold px-3 md:px-4 py-2.5 whitespace-nowrap"
-                        style={{ color: "var(--color-text-secondary)", background: "var(--color-primary-50)", minWidth: w, letterSpacing: "0.02em" }}
-                      >
+                  <tr style={{ background: "var(--color-primary-50)", borderBottom: "1px solid var(--color-border)" }}>
+                    {["Req ID", "Position", "Department", "Location", "Nos.", "Status", "Raised On", "TAT"].map(h => (
+                      <th key={h} style={{ textAlign: "left", padding: "8px 14px", fontSize: 10, fontWeight: 700, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.05em", whiteSpace: "nowrap" }}>
                         {h}
                       </th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.length === 0 ? (
-                    <tr>
-                      <td colSpan={11} className="text-center py-14 text-sm" style={{ color: "var(--color-text-secondary)" }}>
-                        No requisitions found for this status.
-                      </td>
-                    </tr>
-                  ) : filtered.map((r, i) => (
+                  {filtered.map((r, i) => (
                     <tr
                       key={r.req_id || i}
-                      style={{ borderBottom: "1px solid var(--color-border)", cursor: "default" }}
+                      style={{ borderBottom: "1px solid var(--color-border)" }}
                       onMouseEnter={e => e.currentTarget.style.background = "var(--color-primary-50)"}
                       onMouseLeave={e => e.currentTarget.style.background = "transparent"}
                     >
-                      <td className="px-3 md:px-4 py-2.5 whitespace-nowrap">
-                        <span className="font-mono text-xs font-bold" style={{ color: "var(--color-primary-700)" }}>{r.req_id || "—"}</span>
+                      <td style={{ padding: "9px 14px", whiteSpace: "nowrap" }}>
+                        <span style={{ fontFamily: "monospace", fontWeight: 700, fontSize: 11, color: "var(--color-primary-700)" }}>{r.req_id || "—"}</span>
                       </td>
-                      <td className="px-3 md:px-4 py-2.5">
-                        <span className="text-xs font-semibold leading-tight" style={{ color: "var(--color-text-primary)" }}>{r.position_title || "—"}</span>
+                      <td style={{ padding: "9px 14px" }}>
+                        <span style={{ fontWeight: 600, color: "var(--color-text-primary)" }}>{r.position_title || "—"}</span>
                       </td>
-                      <td className="px-3 md:px-4 py-2.5 text-xs" style={{ color: "var(--color-text-secondary)" }}>{r.department || "—"}</td>
-                      <td className="px-3 md:px-4 py-2.5 text-xs whitespace-nowrap" style={{ color: "var(--color-text-secondary)" }}>{r.location || "—"}</td>
-                      <td className="px-3 md:px-4 py-2.5 text-xs text-center font-semibold" style={{ color: "var(--color-text-primary)" }}>{r.total_nos || "—"}</td>
-                      <td className="px-3 md:px-4 py-2.5 text-xs whitespace-nowrap" style={{ color: "var(--color-text-secondary)" }}>{r.poc || "—"}</td>
-                      <td className="px-3 md:px-4 py-2.5 whitespace-nowrap">
-                        <div className="flex flex-col gap-1">
-                          <StatusBadge status={r.status} />
-                          {screeningCounts[r.req_id] > 0 && (
-                            <span
-                              className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-sm w-fit"
-                              style={{ background: "rgba(99,102,241,0.1)", color: "#6366f1", border: "1px solid rgba(99,102,241,0.25)" }}
-                            >
-                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="10" height="10">
-                                <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-                              </svg>
-                              Screening Started · {screeningCounts[r.req_id]}
-                            </span>
-                          )}
-                        </div>
-                      </td>
-                      <td className="px-3 md:px-4 py-2.5 text-xs whitespace-nowrap" style={{ color: "var(--color-text-secondary)" }}>{r.raised_at || "—"}</td>
-                      <td className="px-3 md:px-4 py-2.5 text-xs whitespace-nowrap" style={{ color: "var(--color-text-secondary)" }}>{r.approval_date || "—"}</td>
-                      <td className="px-3 md:px-4 py-2.5 text-xs whitespace-nowrap" style={{ color: "var(--color-text-secondary)" }}>{r.closed_date || "—"}</td>
-                      <td className="px-3 md:px-4 py-2.5 text-xs text-center">
+                      <td style={{ padding: "9px 14px", color: "var(--color-text-secondary)", whiteSpace: "nowrap" }}>{r.department || "—"}</td>
+                      <td style={{ padding: "9px 14px", color: "var(--color-text-secondary)", whiteSpace: "nowrap" }}>{r.location || "—"}</td>
+                      <td style={{ padding: "9px 14px", textAlign: "center", fontWeight: 700, color: "var(--color-text-primary)" }}>{r.total_nos || "—"}</td>
+                      <td style={{ padding: "9px 14px", whiteSpace: "nowrap" }}><ReqStatusBadge status={r.status} /></td>
+                      <td style={{ padding: "9px 14px", color: "var(--color-text-secondary)", whiteSpace: "nowrap" }}>{r.raised_at || "—"}</td>
+                      <td style={{ padding: "9px 14px", textAlign: "center" }}>
                         {r.tat_days
-                          ? <span className="font-bold" style={{ color: "#16a34a" }}>{r.tat_days}d</span>
-                          : <span style={{ color: "var(--color-text-secondary)" }}>—</span>
-                        }
+                          ? <Badge color="#15803d" bg="#dcfce7">{r.tat_days}d</Badge>
+                          : <span style={{ color: "var(--color-text-secondary)" }}>—</span>}
                       </td>
                     </tr>
                   ))}
@@ -320,15 +353,18 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {/* Table footer */}
-          <div
-            className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-1 sm:gap-0 px-3 md:px-4 py-2 text-xs"
-            style={{ borderTop: "1px solid var(--color-border)", background: "var(--color-primary-50)", color: "var(--color-text-secondary)" }}
-          >
-            <span>Showing {filtered.length} of {rows.length} requisition{rows.length !== 1 ? "s" : ""}</span>
-            <span>Last updated: {new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</span>
+          <div style={{
+            padding: "8px 16px", borderTop: "1px solid var(--color-border)",
+            display: "flex", justifyContent: "space-between",
+            fontSize: 11, color: "var(--color-text-secondary)",
+            background: "var(--color-primary-50)",
+          }}>
+            <span>Showing {filtered.length} of {rows.length}</span>
+            <button onClick={() => navigate("/requisitions")} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 11, color: "var(--color-primary-700)", fontWeight: 600 }}>
+              View all requisitions →
+            </button>
           </div>
-        </div>
+        </Card>
 
       </div>
     </div>
