@@ -4,13 +4,13 @@ import { apiLogin } from "../utils/api";
 const AuthContext = createContext(null);
 const SESSION_KEY = "crpl_req_session";
 
-/* ── Demo users — work offline / before GAS is connected ── */
+/* ── Demo users — SOP-HR-001 compliant roles ── */
 const DEMO_USERS = [
-  { id:"USR-001", name:"Himani Khemka",  email:"himani@crpl.com",    password:"himani123",    role:"hr_manager"   },
-  { id:"USR-002", name:"Anna J",         email:"anna@crpl.com",      password:"anna123",      role:"approver"     },
-  { id:"USR-003", name:"Sameeksha",      email:"sameeksha@crpl.com", password:"sam123",       role:"hr_executive" },
-  { id:"USR-004", name:"Department Head",email:"dept@crpl.com",      password:"dept123",      role:"requester"    },
-  { id:"USR-005", name:"Admin",          email:"admin@crpl.com",     password:"admin123",     role:"admin"        },
+  { id:"USR-001", name:"Priya Sharma",   email:"priya@crystal.com",   password:"priya123",   role:"ta_head"         },
+  { id:"USR-002", name:"Ramesh Mehta",   email:"ramesh@crystal.com",  password:"ramesh123",  role:"management"      },
+  { id:"USR-003", name:"Sunita Agarwal", email:"sunita@crystal.com",  password:"sunita123",  role:"chro"            },
+  { id:"USR-004", name:"Himani Khemka",  email:"himani@crystal.com",  password:"himani123",  role:"senior_hr_exec"  },
+  { id:"USR-005", name:"Admin",          email:"admin@crystal.com",   password:"admin123",   role:"admin"           },
 ];
 
 export function AuthProvider({ children }) {

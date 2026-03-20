@@ -112,3 +112,60 @@ export async function getApprovals(params = {}) {
 export async function submitApproval(data) {
   return gasPost({ action: "submitApproval", data });
 }
+
+/* ── Module 3 — AI Evaluation ── */
+export async function getAIEvaluation(candidate_id) {
+  return gasGet({ action: "getAIEvaluation", candidate_id });
+}
+
+/* ── Module 4 — HR Decision ── */
+export async function getHRDecisionCandidates(params = {}) {
+  return gasGet({ action: "getHRDecisionCandidates", ...params });
+}
+
+export async function submitHRDecision(data) {
+  return gasPost({ action: "submitHRDecision", data });
+}
+
+/* ── Module 6 — Document Collection ── */
+export async function getCandidateDocuments(candidate_id) {
+  return gasGet({ action: "getCandidateDocuments", candidate_id });
+}
+
+export async function sendDocumentRequest(data) {
+  return gasPost({ action: "sendDocumentRequest", data });
+}
+
+export async function updateDocumentStatus(data) {
+  return gasPost({ action: "updateDocumentStatus", data });
+}
+
+export async function markDocsVerified(data) {
+  return gasPost({ action: "markDocsVerified", data });
+}
+
+/* ── Module 8 — Onboarding ── */
+export async function getOnboardingCandidates(params = {}) {
+  return gasGet({ action: "getOnboardingCandidates", ...params });
+}
+
+export async function submitOnboarding(data) {
+  return gasPost({ action: "submitOnboarding", data });
+}
+
+export async function updateOnboardingDay(data) {
+  return gasPost({ action: "updateOnboardingDay", data });
+}
+
+export async function completeOnboarding(data) {
+  return gasPost({ action: "completeOnboarding", data });
+}
+
+/* ── Candidate Profile Hub (Section 13) ── */
+export async function getCandidates(params = {}) {
+  return gasGet({ action: "getCandidates", ...params });
+}
+
+export async function getCandidateProfile(candidate_id) {
+  return gasGet({ action: "getCandidateProfile", candidate_id });
+}
