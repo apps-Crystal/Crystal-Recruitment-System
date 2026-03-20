@@ -6,7 +6,18 @@
  */
 import React, { useState, useEffect, useCallback } from "react";
 import { useAuth } from "../context/AuthContext";
-import { getHRDecisionCandidates, getAIEvaluation, submitHRDecision } from "../utils/api";
+import { getHRDecisionCandidates, getHRDecisionHistory, getAIEvaluation, submitHRDecision } from "../utils/api";
+
+/* ── Parse comma-separated or JSON-array fields from Sheets ── */
+function parseList(val) {
+  if (!val) return [];
+  if (Array.isArray(val)) return val;
+  if (typeof val === "string") {
+    try { const p = JSON.parse(val); if (Array.isArray(p)) return p; } catch {}
+    return val.split(",").map(s => s.trim()).filter(Boolean);
+  }
+  return [];
+}
 
 /* ── Colour tokens ─────────────────────────────────────────── */
 const FIT_COLOR = {
@@ -48,8 +59,11 @@ function Badge({ text, style = {} }) {
 export default function HRDecisionPage() {
   const { user } = useAuth();
 
+  const [tab, setTab]                 = useState("queue"); // "queue" | "history"
   const [candidates, setCandidates]   = useState([]);
+  const [history, setHistory]         = useState([]);
   const [loading, setLoading]         = useState(true);
+  const [histLoading, setHistLoading] = useState(false);
   const [selected, setSelected]       = useState(null);
   const [aiData, setAiData]           = useState(null);
   const [aiLoading, setAiLoading]     = useState(false);
@@ -67,7 +81,15 @@ export default function HRDecisionPage() {
     setLoading(false);
   }, []);
 
+  const loadHistory = useCallback(async () => {
+    setHistLoading(true);
+    const res = await getHRDecisionHistory();
+    setHistory(res?.rows || []);
+    setHistLoading(false);
+  }, []);
+
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { if (tab === "history") loadHistory(); }, [tab, loadHistory]);
 
   async function selectCandidate(c) {
     setSelected(c);
@@ -104,6 +126,7 @@ export default function HRDecisionPage() {
         (c.candidate_id || c.CandidateID || c.submission_id) !==
         (selected.candidate_id || selected.CandidateID || selected.submission_id)
       ));
+      setHistory([]); // will reload on next history tab visit
       setSelected(null);
     } else {
       setError(res?.error || "Failed to record decision. Please try again.");
@@ -118,6 +141,11 @@ export default function HRDecisionPage() {
       (c.position_title || c.Title || "").toLowerCase().includes(q);
   });
 
+  const filteredHistory = history.filter(d => {
+    const q = search.toLowerCase();
+    return !q || (d.candidate_name||"").toLowerCase().includes(q) || (d.candidate_id||"").toLowerCase().includes(q) || (d.position_title||"").toLowerCase().includes(q);
+  });
+
   const ai = aiData || {};
   const fitStyle = FIT_COLOR[ai.fitLevel || ai.FitLevel] || { bg:"#f3f4f6", color:"#6b7280", border:"#d1d5db" };
 
@@ -130,12 +158,24 @@ export default function HRDecisionPage() {
         display:"flex", flexDirection:"column", overflow:"hidden",
         background:"var(--color-surface)",
       }}>
-        <div style={{ padding:"14px 12px 10px", borderBottom:"1px solid var(--color-border)" }}>
-          <div style={{ fontSize:13, fontWeight:700, color:"var(--color-text-primary)", marginBottom:8 }}>
-            HR Decision Queue
-          </div>
+        {/* Tab toggle */}
+        <div style={{ display:"flex", borderBottom:"1px solid var(--color-border)" }}>
+          {["queue","history"].map(t => (
+            <button key={t} onClick={() => { setTab(t); setSelected(null); setAiData(null); }}
+              style={{
+                flex:1, padding:"10px 0", border:"none", cursor:"pointer", fontSize:12, fontWeight:600,
+                background: tab === t ? "var(--color-background)" : "transparent",
+                color: tab === t ? "var(--color-primary-700)" : "var(--color-text-secondary)",
+                borderBottom: tab === t ? "2px solid var(--color-accent-500)" : "2px solid transparent",
+              }}>
+              {t === "queue" ? `Pending (${candidates.length})` : "Recorded"}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ padding:"10px 12px 8px", borderBottom:"1px solid var(--color-border)" }}>
           <input
-            placeholder="Search candidates…"
+            placeholder={tab === "queue" ? "Search candidates…" : "Search decisions…"}
             value={search}
             onChange={e => setSearch(e.target.value)}
             style={{
@@ -147,49 +187,87 @@ export default function HRDecisionPage() {
         </div>
 
         <div style={{ flex:1, overflowY:"auto", padding:"6px 8px" }} className="custom-scrollbar">
-          {loading ? (
-            <div style={{ padding:24, textAlign:"center", fontSize:12, color:"var(--color-text-secondary)" }}>Loading…</div>
-          ) : filtered.length === 0 ? (
-            <div style={{ padding:24, textAlign:"center", fontSize:12, color:"var(--color-text-secondary)" }}>
-              {candidates.length === 0 ? "No candidates awaiting HR Decision." : "No results found."}
-            </div>
-          ) : filtered.map(c => {
-            const id = c.candidate_id || c.CandidateID || c.submission_id;
-            const isActive = (selected?.candidate_id || selected?.CandidateID || selected?.submission_id) === id;
-            const fit = c.ai_fit_level || c.AI_FitLevel || "";
-            const score = c.ai_match_score ?? c.AI_MatchScore ?? null;
-            return (
-              <button
-                key={id}
-                onClick={() => selectCandidate(c)}
-                style={{
+          {tab === "queue" ? (
+            loading ? (
+              <div style={{ padding:24, textAlign:"center", fontSize:12, color:"var(--color-text-secondary)" }}>Loading…</div>
+            ) : filtered.length === 0 ? (
+              <div style={{ padding:24, textAlign:"center", fontSize:12, color:"var(--color-text-secondary)" }}>
+                {candidates.length === 0 ? "No candidates awaiting HR Decision." : "No results found."}
+              </div>
+            ) : filtered.map(c => {
+              const id = c.candidate_id || c.CandidateID || c.submission_id;
+              const isActive = (selected?.candidate_id || selected?.CandidateID || selected?.submission_id) === id;
+              const fit = c.ai_fit_level || c.AI_FitLevel || "";
+              const score = c.ai_match_score ?? c.AI_MatchScore ?? null;
+              return (
+                <button key={id} onClick={() => selectCandidate(c)} style={{
                   width:"100%", textAlign:"left", padding:"10px 10px", borderRadius:6,
                   border:"none", cursor:"pointer", marginBottom:4,
                   background: isActive ? "rgba(200,169,81,0.14)" : "transparent",
                   borderLeft: isActive ? "3px solid var(--color-accent-500)" : "3px solid transparent",
+                }}>
+                  <div style={{ fontWeight:600, fontSize:12, color:"var(--color-text-primary)", marginBottom:2 }}>
+                    {c.candidate_name || c.FullName || "—"}
+                  </div>
+                  <div style={{ fontSize:11, color:"var(--color-text-secondary)", marginBottom:4 }}>
+                    {c.position_title || c.Title || "—"} &bull; {c.candidate_id || c.CandidateID || ""}
+                  </div>
+                  <div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>
+                    {score != null && (
+                      <Badge text={`Match: ${score}%`} style={{ background:"#eff6ff", color:"#1d4ed8", fontSize:9 }}/>
+                    )}
+                    {fit && (
+                      <Badge text={fit} style={{ background: FIT_COLOR[fit]?.bg || "#f3f4f6", color: FIT_COLOR[fit]?.color || "#6b7280", fontSize:9 }}/>
+                    )}
+                  </div>
+                </button>
+              );
+            })
+          ) : (
+            histLoading ? (
+              <div style={{ padding:24, textAlign:"center", fontSize:12, color:"var(--color-text-secondary)" }}>Loading…</div>
+            ) : filteredHistory.length === 0 ? (
+              <div style={{ padding:24, textAlign:"center", fontSize:12, color:"var(--color-text-secondary)" }}>
+                {history.length === 0 ? "No recorded decisions yet." : "No results found."}
+              </div>
+            ) : filteredHistory.map(d => {
+              const decStyle = DEC_COLOR[d.decision] || { bg:"#f3f4f6", color:"#6b7280" };
+              const isActive = selected?.decision_id === d.decision_id;
+              return (
+                <button key={d.decision_id} onClick={() => {
+                  setSelected(d);
+                  setAiData(null);
+                  setAiLoading(true);
+                  getAIEvaluation(d.candidate_id).then(r => { setAiData(r?.evaluation || r || null); setAiLoading(false); });
                 }}
-              >
-                <div style={{ fontWeight:600, fontSize:12, color:"var(--color-text-primary)", marginBottom:2 }}>
-                  {c.candidate_name || c.FullName || "—"}
-                </div>
-                <div style={{ fontSize:11, color:"var(--color-text-secondary)", marginBottom:4 }}>
-                  {c.position_title || c.Title || "—"} &bull; {c.candidate_id || c.CandidateID || ""}
-                </div>
-                <div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>
-                  {score != null && (
-                    <Badge text={`Match: ${score}%`} style={{ background:"#eff6ff", color:"#1d4ed8", fontSize:9 }}/>
-                  )}
-                  {fit && (
-                    <Badge text={fit} style={{ background: FIT_COLOR[fit]?.bg || "#f3f4f6", color: FIT_COLOR[fit]?.color || "#6b7280", fontSize:9 }}/>
-                  )}
-                </div>
-              </button>
-            );
-          })}
+                  style={{
+                    width:"100%", textAlign:"left", padding:"10px 10px", borderRadius:6,
+                    border:"none", cursor:"pointer", marginBottom:4,
+                    background: isActive ? "rgba(200,169,81,0.14)" : "transparent",
+                    borderLeft: isActive ? "3px solid var(--color-accent-500)" : "3px solid transparent",
+                  }}>
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:2 }}>
+                    <span style={{ fontWeight:600, fontSize:12, color:"var(--color-text-primary)" }}>
+                      {d.candidate_name || "—"}
+                    </span>
+                    <Badge text={d.decision} style={{ background:decStyle.bg, color:decStyle.color, fontSize:9 }}/>
+                  </div>
+                  <div style={{ fontSize:11, color:"var(--color-text-secondary)", marginBottom:2 }}>
+                    {d.position_title || "—"} &bull; {d.candidate_id || ""}
+                  </div>
+                  <div style={{ fontSize:10, color:"var(--color-text-secondary)" }}>
+                    By {d.decided_by || "—"} &bull; {d.decided_at ? new Date(d.decided_at).toLocaleDateString("en-IN") : ""}
+                  </div>
+                </button>
+              );
+            })
+          )}
         </div>
 
         <div style={{ padding:"8px 12px", borderTop:"1px solid var(--color-border)", fontSize:10, color:"var(--color-text-secondary)" }}>
-          {filtered.length} candidate{filtered.length !== 1 ? "s" : ""} awaiting decision
+          {tab === "queue"
+            ? `${filtered.length} candidate${filtered.length !== 1 ? "s" : ""} awaiting decision`
+            : `${history.length} decision${history.length !== 1 ? "s" : ""} recorded`}
         </div>
       </div>
 
@@ -216,8 +294,12 @@ export default function HRDecisionPage() {
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" width="48" height="48" style={{ opacity:0.3 }}>
               <path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
             </svg>
-            <div style={{ fontSize:14, fontWeight:600 }}>Select a candidate to review</div>
-            <div style={{ fontSize:12 }}>Review AI evaluation and record HR Decision</div>
+            <div style={{ fontSize:14, fontWeight:600 }}>
+              {tab === "history" ? "Select a recorded decision to view" : "Select a candidate to review"}
+            </div>
+            <div style={{ fontSize:12 }}>
+              {tab === "history" ? "View AI evaluation and decision details" : "Review AI evaluation and record HR Decision"}
+            </div>
           </div>
         ) : aiLoading ? (
           <div style={{ padding:40, textAlign:"center", color:"var(--color-text-secondary)", fontSize:13 }}>
@@ -250,7 +332,7 @@ export default function HRDecisionPage() {
 
               {!ai.matchScore && !ai.MatchScore ? (
                 <div style={{ fontSize:12, color:"var(--color-text-secondary)", fontStyle:"italic" }}>
-                  AI Evaluation not yet available for this candidate. (AI pipeline runs automatically after candidate submission via GAS backend.)
+                  AI Evaluation not yet available for this candidate.
                 </div>
               ) : (
                 <>
@@ -309,21 +391,21 @@ export default function HRDecisionPage() {
                   <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12 }}>
                     <div>
                       <div style={{ fontSize:11, fontWeight:600, color:"#15803d", marginBottom:4 }}>Strengths</div>
-                      {(JSON.parse(ai.strengths || ai.Strengths || "[]")).map((s, i) => (
+                      {parseList(ai.strengths || ai.Strengths).map((s, i) => (
                         <div key={i} style={{ fontSize:11, color:"var(--color-text-secondary)", marginBottom:2 }}>• {s}</div>
                       ))}
                     </div>
                     <div>
                       <div style={{ fontSize:11, fontWeight:600, color:"#b45309", marginBottom:4 }}>Weaknesses</div>
-                      {(JSON.parse(ai.weaknesses || ai.Weaknesses || "[]")).map((w, i) => (
+                      {parseList(ai.weaknesses || ai.Weaknesses).map((w, i) => (
                         <div key={i} style={{ fontSize:11, color:"var(--color-text-secondary)", marginBottom:2 }}>• {w}</div>
                       ))}
                     </div>
                     <div>
                       <div style={{ fontSize:11, fontWeight:600, color:"#b91c1c", marginBottom:4 }}>Risk Flags</div>
-                      {(JSON.parse(ai.riskFlags || ai.RiskFlags || "[]")).length === 0
+                      {parseList(ai.riskFlags || ai.RiskFlags).length === 0
                         ? <div style={{ fontSize:11, color:"#16a34a" }}>None detected</div>
-                        : (JSON.parse(ai.riskFlags || ai.RiskFlags || "[]")).map((r, i) => (
+                        : parseList(ai.riskFlags || ai.RiskFlags).map((r, i) => (
                             <div key={i} style={{ fontSize:11, color:"#dc2626", marginBottom:2 }}>⚠ {r}</div>
                           ))
                       }
@@ -335,7 +417,7 @@ export default function HRDecisionPage() {
                     <div>
                       <div style={{ fontSize:11, fontWeight:600, color:"#15803d", marginBottom:4 }}>Matched Skills</div>
                       <div style={{ display:"flex", flexWrap:"wrap", gap:4 }}>
-                        {(JSON.parse(ai.matchedSkills || ai.MatchedSkills || "[]")).map((s, i) => (
+                        {parseList(ai.matchedSkills || ai.MatchedSkills).map((s, i) => (
                           <Badge key={i} text={s} style={{ background:"#dcfce7", color:"#15803d", fontSize:9 }}/>
                         ))}
                       </div>
@@ -343,7 +425,7 @@ export default function HRDecisionPage() {
                     <div>
                       <div style={{ fontSize:11, fontWeight:600, color:"#b91c1c", marginBottom:4 }}>Missing Skills</div>
                       <div style={{ display:"flex", flexWrap:"wrap", gap:4 }}>
-                        {(JSON.parse(ai.missingSkills || ai.MissingSkills || "[]")).map((s, i) => (
+                        {parseList(ai.missingSkills || ai.MissingSkills).map((s, i) => (
                           <Badge key={i} text={s} style={{ background:"#fee2e2", color:"#b91c1c", fontSize:9 }}/>
                         ))}
                       </div>
@@ -353,85 +435,132 @@ export default function HRDecisionPage() {
               )}
             </div>
 
-            {/* HR Decision Form (SOP §8) */}
-            <form onSubmit={handleSubmit}>
+            {/* HR Decision Form (SOP §8) or Recorded Decision view */}
+            {tab === "history" ? (
               <div style={{
                 background:"var(--color-surface)", border:"1px solid var(--color-border)",
                 borderRadius:10, padding:18,
               }}>
                 <div style={{ fontSize:12, fontWeight:700, color:"var(--color-primary-700)", marginBottom:14 }}>
-                  Record HR Decision
+                  Recorded Decision
                 </div>
-
-                <div style={{ fontSize:11, color:"var(--color-text-secondary)", marginBottom:12, fontStyle:"italic" }}>
-                  Important: AI recommendation is advisory only. The Senior HR Executive retains full authority over all screening decisions (SOP §7.2).
-                </div>
-
-                {/* Decision buttons */}
-                <div style={{ display:"flex", gap:10, marginBottom:16 }}>
-                  {["Shortlist","Hold","Reject"].map(d => (
-                    <button
-                      key={d}
-                      type="button"
-                      onClick={() => { setDecision(d); setError(""); }}
-                      style={{
-                        flex:1, padding:"10px 0", borderRadius:6, cursor:"pointer",
-                        fontWeight:700, fontSize:13, border:"2px solid",
-                        borderColor: decision === d
-                          ? (d === "Shortlist" ? "#16a34a" : d === "Hold" ? "#ca8a04" : "#dc2626")
-                          : "var(--color-border)",
-                        background: decision === d
-                          ? (d === "Shortlist" ? "#dcfce7" : d === "Hold" ? "#fef9c3" : "#fee2e2")
-                          : "transparent",
-                        color: decision === d
-                          ? (d === "Shortlist" ? "#15803d" : d === "Hold" ? "#92400e" : "#991b1b")
-                          : "var(--color-text-secondary)",
-                      }}
-                    >{d === "Shortlist" ? "✓ Shortlist" : d === "Hold" ? "⏸ Hold" : "✗ Reject"}</button>
-                  ))}
-                </div>
-
-                {/* Remarks */}
-                <div style={{ marginBottom:12 }}>
-                  <label style={{ fontSize:12, fontWeight:600, display:"block", marginBottom:4, color:"var(--color-text-primary)" }}>
-                    Remarks {(decision === "Hold" || decision === "Reject") ? <span style={{ color:"#dc2626" }}>*</span> : "(optional for Shortlist)"}
-                  </label>
-                  <textarea
-                    value={remarks}
-                    onChange={e => setRemarks(e.target.value)}
-                    rows={3}
-                    placeholder={
-                      decision === "Reject" ? "Provide reason for rejection (mandatory)…"
-                      : decision === "Hold" ? "Provide reason for hold (mandatory)…"
-                      : "Optional notes for shortlist…"
-                    }
-                    style={{
-                      width:"100%", padding:"8px 10px", borderRadius:6,
-                      border:`1px solid ${error && (decision === "Hold" || decision === "Reject") && !remarks.trim() ? "#dc2626" : "var(--color-border)"}`,
-                      fontSize:12, background:"var(--color-background)", color:"var(--color-text-primary)",
-                      resize:"vertical", boxSizing:"border-box",
-                    }}
-                  />
-                </div>
-
-                {error && <div style={{ color:"#dc2626", fontSize:12, marginBottom:10 }}>{error}</div>}
-
-                <button
-                  type="submit"
-                  disabled={submitting || !decision}
-                  style={{
-                    padding:"10px 24px", borderRadius:6, fontWeight:700, fontSize:13,
-                    background: decision
-                      ? (decision === "Shortlist" ? "#16a34a" : decision === "Hold" ? "#ca8a04" : "#dc2626")
-                      : "var(--color-border)",
-                    color:"#fff", border:"none", cursor: decision ? "pointer" : "not-allowed",
-                    opacity: submitting ? 0.7 : 1,
-                  }}
-                >
-                  {submitting ? "Recording…" : `Confirm ${decision || "Decision"}`}
-                </button>
+                {(() => {
+                  const decStyle = DEC_COLOR[selected.decision] || { bg:"#f3f4f6", color:"#6b7280" };
+                  return (
+                    <>
+                      <div style={{ display:"flex", gap:12, alignItems:"center", marginBottom:14 }}>
+                        <span style={{ padding:"6px 18px", borderRadius:6, fontWeight:700, fontSize:14, background:decStyle.bg, color:decStyle.color }}>
+                          {selected.decision}
+                        </span>
+                        <div style={{ fontSize:12, color:"var(--color-text-secondary)" }}>
+                          Decision ID: <strong>{selected.decision_id}</strong>
+                        </div>
+                      </div>
+                      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:12 }}>
+                        {[
+                          ["Candidate", selected.candidate_name],
+                          ["Candidate ID", selected.candidate_id],
+                          ["Position", selected.position_title],
+                          ["Req ID", selected.req_id],
+                          ["Decided By", selected.decided_by],
+                          ["Decided At", selected.decided_at ? new Date(selected.decided_at).toLocaleString("en-IN") : "—"],
+                        ].map(([l, v]) => (
+                          <div key={l}>
+                            <div style={{ fontSize:10, color:"var(--color-text-secondary)", marginBottom:2 }}>{l}</div>
+                            <div style={{ fontSize:12, fontWeight:600, color:"var(--color-text-primary)" }}>{v || "—"}</div>
+                          </div>
+                        ))}
+                      </div>
+                      {selected.remarks && (
+                        <div style={{ background:"var(--color-background)", borderRadius:6, padding:"10px 12px", fontSize:12, color:"var(--color-text-primary)", lineHeight:1.6 }}>
+                          <div style={{ fontSize:10, fontWeight:600, color:"var(--color-text-secondary)", marginBottom:4 }}>REMARKS</div>
+                          {selected.remarks}
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
-            </form>
+            ) : (
+              <form onSubmit={handleSubmit}>
+                <div style={{
+                  background:"var(--color-surface)", border:"1px solid var(--color-border)",
+                  borderRadius:10, padding:18,
+                }}>
+                  <div style={{ fontSize:12, fontWeight:700, color:"var(--color-primary-700)", marginBottom:14 }}>
+                    Record HR Decision
+                  </div>
+
+                  <div style={{ fontSize:11, color:"var(--color-text-secondary)", marginBottom:12, fontStyle:"italic" }}>
+                    Important: AI recommendation is advisory only. The Senior HR Executive retains full authority over all screening decisions (SOP §7.2).
+                  </div>
+
+                  {/* Decision buttons */}
+                  <div style={{ display:"flex", gap:10, marginBottom:16 }}>
+                    {["Shortlist","Hold","Reject"].map(d => (
+                      <button
+                        key={d}
+                        type="button"
+                        onClick={() => { setDecision(d); setError(""); }}
+                        style={{
+                          flex:1, padding:"10px 0", borderRadius:6, cursor:"pointer",
+                          fontWeight:700, fontSize:13, border:"2px solid",
+                          borderColor: decision === d
+                            ? (d === "Shortlist" ? "#16a34a" : d === "Hold" ? "#ca8a04" : "#dc2626")
+                            : "var(--color-border)",
+                          background: decision === d
+                            ? (d === "Shortlist" ? "#dcfce7" : d === "Hold" ? "#fef9c3" : "#fee2e2")
+                            : "transparent",
+                          color: decision === d
+                            ? (d === "Shortlist" ? "#15803d" : d === "Hold" ? "#92400e" : "#991b1b")
+                            : "var(--color-text-secondary)",
+                        }}
+                      >{d === "Shortlist" ? "✓ Shortlist" : d === "Hold" ? "⏸ Hold" : "✗ Reject"}</button>
+                    ))}
+                  </div>
+
+                  {/* Remarks */}
+                  <div style={{ marginBottom:12 }}>
+                    <label style={{ fontSize:12, fontWeight:600, display:"block", marginBottom:4, color:"var(--color-text-primary)" }}>
+                      Remarks {(decision === "Hold" || decision === "Reject") ? <span style={{ color:"#dc2626" }}>*</span> : "(optional for Shortlist)"}
+                    </label>
+                    <textarea
+                      value={remarks}
+                      onChange={e => setRemarks(e.target.value)}
+                      rows={3}
+                      placeholder={
+                        decision === "Reject" ? "Provide reason for rejection (mandatory)…"
+                        : decision === "Hold" ? "Provide reason for hold (mandatory)…"
+                        : "Optional notes for shortlist…"
+                      }
+                      style={{
+                        width:"100%", padding:"8px 10px", borderRadius:6,
+                        border:`1px solid ${error && (decision === "Hold" || decision === "Reject") && !remarks.trim() ? "#dc2626" : "var(--color-border)"}`,
+                        fontSize:12, background:"var(--color-background)", color:"var(--color-text-primary)",
+                        resize:"vertical", boxSizing:"border-box",
+                      }}
+                    />
+                  </div>
+
+                  {error && <div style={{ color:"#dc2626", fontSize:12, marginBottom:10 }}>{error}</div>}
+
+                  <button
+                    type="submit"
+                    disabled={submitting || !decision}
+                    style={{
+                      padding:"10px 24px", borderRadius:6, fontWeight:700, fontSize:13,
+                      background: decision
+                        ? (decision === "Shortlist" ? "#16a34a" : decision === "Hold" ? "#ca8a04" : "#dc2626")
+                        : "var(--color-border)",
+                      color:"#fff", border:"none", cursor: decision ? "pointer" : "not-allowed",
+                      opacity: submitting ? 0.7 : 1,
+                    }}
+                  >
+                    {submitting ? "Recording…" : `Confirm ${decision || "Decision"}`}
+                  </button>
+                </div>
+              </form>
+            )}
           </>
         )}
       </div>

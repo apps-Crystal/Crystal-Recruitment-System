@@ -126,6 +126,9 @@ export async function getAIEvaluation(candidate_id) {
 export async function getHRDecisionCandidates(params = {}) {
   return gasGet({ action: "getHRDecisionCandidates", ...params });
 }
+export async function getHRDecisionHistory() {
+  return gasGet({ action: "getHRDecisionHistory" });
+}
 
 export async function submitHRDecision(data) {
   return gasPost({ action: "submitHRDecision", data });
